@@ -182,7 +182,7 @@
     TINTS = makeTints(hueFor(name));
     PAL = buildPal(TINTS, false);
     PAL_W = buildPal(TINTS, true);
-    seedline.textContent = `${MODE} · seed "${SEED_STR}" · ${name} · ${NUM} strands` + (MSG ? ` · "${MSG}"` : '');
+    seedline.textContent = `${MODE} · seed "${SEED_STR}" · ${name} · ${strands.length} strands` + (MSG ? ` · "${MSG}"` : '');
   }
   function pickTint() {
     let r = rng();
@@ -194,6 +194,9 @@
   // --- strands ---
   // density also falls out of the seed unless it is pinned in the hash
   const NUM = Math.max(40, Math.min(900, +P.get('density') || (200 + (SEED >>> 8) % 180)));
+  // classic runs about twice as many: most columns are lit at any moment in
+  // the film, and each drop is on screen for only about half its cycle
+  const NUM_CLASSIC = P.get('density') ? NUM : Math.min(900, Math.round(NUM * 2));
   const strands = [];
   setPalette(paletteName);
 
@@ -219,7 +222,7 @@
       s.gs = GLYPH_SPACING;
       s.len = Math.ceil(H / (GLYPH_SPACING * scale)) + 34;
       s.trail = rand(10, 28) / s.len;                  // 10-28 lit glyphs behind the head
-      s.gap = rand(0.3, 1.2) * s.len;                  // columns are dark more than they are lit
+      s.gap = rand(0.15, 0.7) * s.len;                 // a short dark spell between drops
     } else {
       // A corridor, not a cube: most strands live in an annulus around the axis
       // so walls stream past on either side and the centre stays open where you
@@ -268,14 +271,16 @@
   }
   function setMode(m) {
     MODE = m;
+    const n = MODE === 'classic' ? NUM_CLASSIC : NUM;
+    strands.length = Math.min(strands.length, n);
+    while (strands.length < n) strands.push({});
     for (const s of strands) spawn(s, 0);
+    // Sorted far -> near ONCE. Every strand's z changes by the same amount each
+    // frame, so the order only breaks where one is recycled; see the frame loop.
     strands.sort((a, b) => b.z - a.z);
     setPalette(paletteName);
   }
-  for (let i = 0; i < NUM; i++) strands.push(spawn({}, 0));
-  // Sorted far -> near ONCE. Every strand's z changes by the same amount each
-  // frame, so the order only breaks where one is recycled; see the frame loop.
-  strands.sort((a, b) => b.z - a.z);
+  setMode(MODE);
 
   let last = 0;
 
