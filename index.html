@@ -220,7 +220,13 @@
   // far-cull size down when frames are being dropped, and back up cautiously
   // when there is clear headroom, so the page finds its own level on whatever
   // it is running on. Each down-step doubles the wait before trying up again.
-  const TOUCH = 'ontouchstart' in window;
+  // 'ontouchstart' is true on any machine with a touchscreen, and in Chrome's
+  // device emulation, so it says nothing about how the page is actually driven.
+  // The phone profile keys off the PRIMARY pointer instead; the gestures are
+  // wired wherever touch exists, so a touchscreen laptop keeps the desktop look
+  // and still responds to a finger.
+  const HAS_TOUCH = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+  const TOUCH = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
   const MAX_DPR = Math.min(window.devicePixelRatio || 1, TOUCH ? 1.5 : 2);
   const QUALITY = [1, 0.75, 0.5];   // render-scale steps
   let qi = 0;
@@ -659,6 +665,8 @@
   if (TOUCH) {
     keys.hidden = true; taps.hidden = false; pad.hidden = false;
     pad.addEventListener('click', (e) => { const k = e.target.dataset && e.target.dataset.k; if (k) act(k); });
+  }
+  if (HAS_TOUCH) {
     let pinchY = null, pinchSpeed = 0, lastTap = 0;
     const midY = (t) => (t[0].clientY + t[1].clientY) / 2;
     canvas.addEventListener('touchstart', (e) => {
