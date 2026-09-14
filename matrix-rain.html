@@ -9,85 +9,154 @@
   canvas { display: block; cursor: crosshair; }
   #hud {
     position: fixed; left: 14px; bottom: 12px;
-    font: 12px/1.5 monospace; color: #00ff41aa;
-    text-shadow: 0 0 6px #00ff4166; pointer-events: none; user-select: none;
+    font: 12px/1.5 monospace; color: #ffffff88;
+    text-shadow: 0 0 6px #00000099; pointer-events: none; user-select: none;
   }
-  #hud b { color: #cfffe0; }
+  #hud b { color: #ffffffd0; }
+  #hud .seed { display: block; opacity: 0.6; }
+  #hud.off { display: none; }
 </style>
 </head>
 <body>
 <canvas id="matrix"></canvas>
 <div id="hud">
-  move <b>mouse</b> to steer &nbsp;·&nbsp; <b>scroll</b> / <b>W</b>/<b>S</b> to change speed &nbsp;·&nbsp; <b>space</b> to warp
+  move <b>mouse</b> to steer &nbsp;·&nbsp; <b>scroll</b> / <b>W</b>/<b>S</b> speed &nbsp;·&nbsp; <b>space</b> warp &nbsp;·&nbsp; <b>C</b> palette &nbsp;·&nbsp; <b>P</b> save &nbsp;·&nbsp; <b>H</b> hide
+  <span class="seed" id="seedline"></span>
 </div>
 <script>
   const canvas = document.getElementById('matrix');
   const ctx = canvas.getContext('2d');
 
+  // --- config: everything lives in the URL hash, so a look is shareable -------
+  // #seed=matteo&palette=amber&density=320&msg=WAKE+UP&glyphs=01&idle=1
+  const P = new URLSearchParams(location.hash.slice(1));
+  const SEED_STR = P.get('seed') || 'matrix';
+  const MSG = (P.get('msg') || '').toUpperCase();
+
+  // FNV-1a -> mulberry32: same seed string always grows the same field.
+  const hash32 = (str) => {
+    let h = 2166136261 >>> 0;
+    for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+    return h >>> 0;
+  };
+  const mulberry32 = (a) => () => {
+    a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const SEED = hash32(SEED_STR);
+  const rng = mulberry32(SEED);
+  const rand = (a, b) => a + rng() * (b - a);
+
   const katakana = 'アァカサタナハマヤャラワガザダバパイィキシチニヒミリヰギジヂビピウゥクスツヌフムユュルグズブヅプエェケセテネヘメレヱゲゼデベペオォコソトノホモヨョロヲゴゾドボポヴッン';
-  const glyphs = (katakana + 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:."=*+-<>').split('');
-  const rand = (a, b) => a + Math.random() * (b - a);
-  const pick = () => glyphs[(Math.random() * glyphs.length) | 0];
+  const glyphs = P.get('glyphs')
+    ? [...new Set(P.get('glyphs'))]
+    : (katakana + 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:."=*+-<>').split('');
+  const pick = () => glyphs[(rng() * glyphs.length) | 0];
 
   // --- camera / projection ---
-  let W, H, cx, cy;
+  let W, H, cx, cy, dpr;
   const FOCAL = 420;        // lens: larger = narrower FOV / more zoom
   const NEAR = 40;          // z at which a strand has flown past us
   const FAR = 2600;         // spawn depth
+  const BEHIND = FAR;       // reversing past this recycles a strand to the near plane
   const GLYPH_SPACING = 26; // world-space vertical gap between glyphs in a strand
   const FIELD = 1400;       // how far strands spread from the centre axis
 
-  // steering: target (from mouse) vs eased current, so it glides instead of snapping
-  let steerTX = 0, steerTY = 0, steerX = 0, steerY = 0;
+  // The camera moves through the field; strands are NOT panned on screen. That
+  // is what buys depth-dependent parallax: near strands sweep, far ones drift.
+  let camTX = 0, camTY = 0, camX = 0, camY = 0;
+  let focal = FOCAL;        // eased: widens (dolly-zoom) as speed climbs
 
   // speed: eased toward a target so acceleration ramps instead of jumping
   let speedTarget = 6, speed = 6;   // forward walking speed (world units / frame)
 
+  const IDLE_DRIFT = P.get('idle') === '1';
+  let lastMouse = -1e9;     // autopilot takes over after a few idle seconds
+
   function resize() {
-    W = canvas.width = window.innerWidth;
-    H = canvas.height = window.innerHeight;
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = W * dpr; canvas.height = H * dpr;   // render at native pixels
+    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
     cx = W / 2; cy = H / 2;
   }
   resize();
   window.addEventListener('resize', resize);
 
-  // --- colour tints ---------------------------------------------------------
-  // A few strand "personalities": mostly classic green, some pale/bright, some
-  // deep & dim, a rare cyan-tinged one. w = how often it appears.
-  const TINTS = [
-    { body: [0, 255, 65],   head: [200, 255, 205], glow: '#9dffb0', w: 0.58 }, // classic
-    { body: [120, 255, 150], head: [225, 255, 230], glow: '#c8ffd4', w: 0.16 }, // pale bright
-    { body: [0, 170, 45],   head: [150, 225, 165], glow: '#3fbf6a', w: 0.16 }, // deep / dim
-    { body: [0, 255, 190],  head: [190, 255, 235], glow: '#7fffe0', w: 0.10 }, // cyan-green
+  // --- colour ---------------------------------------------------------------
+  // A palette is one hue with four strand "personalities" hung off it: mostly
+  // classic, some pale/bright, some deep & dim, a rare shifted one.
+  const hsl = (h, s, l) => {
+    h = ((h % 360) + 360) % 360; s /= 100; l /= 100;
+    const c = (1 - Math.abs(2 * l - 1)) * s, x = c * (1 - Math.abs((h / 60) % 2 - 1)), m = l - c / 2;
+    const i = (h / 60) | 0;
+    const r = [c, x, 0, 0, x, c][i], g = [x, c, c, x, 0, 0][i], b = [0, 0, x, c, c, x][i];
+    return [((r + m) * 255) | 0, ((g + m) * 255) | 0, ((b + m) * 255) | 0];
+  };
+  const makeTints = (hue) => [
+    { body: hsl(hue, 100, 50),     head: hsl(hue, 100, 89),     w: 0.58 },  // classic
+    { body: hsl(hue + 12, 100, 73), head: hsl(hue + 12, 100, 94), w: 0.16 }, // pale bright
+    { body: hsl(hue - 8, 100, 33),  head: hsl(hue - 8, 70, 74),   w: 0.16 }, // deep / dim
+    { body: hsl(hue + 45, 100, 50), head: hsl(hue + 45, 100, 87), w: 0.10 }, // shifted accent
   ];
+  const NAMED = { green: 135, amber: 42, ice: 190, magenta: 310, blood: 0, gold: 52 };
+  const NAMES = Object.keys(NAMED);
+  // palette=seed  -> a hue nobody else's seed lands on
+  // palette=auto  -> tracks the local clock: amber evenings, ice at night
+  function hueFor(name) {
+    if (name === 'auto') { const h = new Date().getHours(); return h < 6 ? 190 : h < 11 ? 135 : h < 17 ? 52 : h < 21 ? 42 : 310; }
+    if (name === 'seed' || !(name in NAMED)) return SEED % 360;
+    return NAMED[name];
+  }
+  let paletteName = P.get('palette') || 'seed';
+
   const STEPS = 32;
+  const WARP_RGB = [190, 255, 255];   // everything bleaches toward this at speed
   // Precompute every colour string once so the hot loop never allocates.
-  const PAL = TINTS.map(t => {
-    const body = [], head = [];
-    for (let i = 0; i <= STEPS; i++) {
-      const a = (i / STEPS).toFixed(3);
-      body[i] = `rgba(${t.body[0]},${t.body[1]},${t.body[2]},${a})`;
-      head[i] = `rgba(${t.head[0]},${t.head[1]},${t.head[2]},${a})`;
-    }
-    return { body, head, glow: t.glow };
-  });
+  function buildPal(tints, warpMix) {
+    const mix = (c) => warpMix ? c.map((v, i) => (v + (WARP_RGB[i] - v) * 0.72) | 0) : c;
+    return tints.map(t => {
+      const b = mix(t.body), h = mix(t.head), body = [], head = [];
+      for (let i = 0; i <= STEPS; i++) {
+        const a = (i / STEPS).toFixed(3);
+        body[i] = `rgba(${b[0]},${b[1]},${b[2]},${a})`;
+        head[i] = `rgba(${h[0]},${h[1]},${h[2]},${a})`;
+      }
+      return { body, head, glow: `rgb(${h[0]},${h[1]},${h[2]})` };
+    });
+  }
+  let TINTS, PAL, PAL_W;
+  function setPalette(name) {
+    paletteName = name;
+    TINTS = makeTints(hueFor(name));
+    PAL = buildPal(TINTS, false);
+    PAL_W = buildPal(TINTS, true);
+    seedline.textContent = `seed "${SEED_STR}" · ${name} · ${NUM} strands` + (MSG ? ` · "${MSG}"` : '');
+  }
   function pickTint() {
-    let r = Math.random();
+    let r = rng();
     for (let i = 0; i < TINTS.length; i++) { r -= TINTS[i].w; if (r <= 0) return i; }
     return 0;
   }
   const SHADOW_MIN = 14;   // only glow heads large enough for the blur to read
 
   // --- strands ---
-  const NUM = 260;
+  // density also falls out of the seed unless it is pinned in the hash
+  const NUM = Math.max(40, Math.min(900, +P.get('density') || (200 + (SEED >>> 8) % 180)));
   const strands = [];
+  setPalette(paletteName);
 
-  function spawn(s, atFar) {
+  function spawn(s, where) {
     s.x = rand(-FIELD, FIELD);
     s.y = rand(-FIELD, FIELD);
-    s.z = atFar ? FAR : rand(NEAR, FAR);
+    // `where`: 0 = anywhere (startup), 1 = far edge, -1 = just in front of us
+    // Recycled strands land on an exact plane: any jitter here would break the
+    // far -> near ordering the frame loop relies on instead of sorting.
+    s.z = where === 1 ? FAR : where === -1 ? NEAR + 1 : rand(NEAR, FAR);
     // skewed so most strands are short-to-medium but some trail much longer
-    s.len = (6 + Math.pow(rand(0, 1), 1.8) * 64) | 0;   // ~6 to ~70
+    s.len = (6 + Math.pow(rng(), 1.8) * 64) | 0;   // ~6 to ~70
     s.head = rand(0, s.len);      // bright leading glyph, descends the strand
     s.fall = rand(0.1, 0.7);      // rain speed within the strand
     s.tint = pickTint();          // colour personality
@@ -95,10 +164,25 @@
     s.trail = rand(0.45, 1.35);   // <1 short punchy trail, >1 long fading tail
     s.mut = rand(0.004, 0.06);    // how twitchy the glyphs are
     s.dim = rand(0.55, 1);        // overall brightness of the whole strand
-    s.chars = Array.from({ length: s.len }, pick);
+    s.wo = rng();                 // warp threshold -> the field bleaches unevenly
+    s.msg = false;
+    if (!s.chars) s.chars = [];
+    // A few strands carry the message instead of noise: frozen glyphs, long
+    // trail, so the whole word stays lit and reads as it flies past.
+    if (MSG && rng() < 0.03) {
+      s.msg = true; s.len = MSG.length; s.mut = 0; s.trail = 3;
+      s.dim = 1; s.fall = 0.05; s.gs = GLYPH_SPACING * rand(1.0, 1.4);
+      for (let i = 0; i < s.len; i++) s.chars[i] = MSG[i];
+    } else {
+      for (let i = 0; i < s.len; i++) s.chars[i] = pick();
+    }
+    s.chars.length = s.len;
     return s;
   }
-  for (let i = 0; i < NUM; i++) strands.push(spawn({}, false));
+  for (let i = 0; i < NUM; i++) strands.push(spawn({}, 0));
+  // Sorted far -> near ONCE. Every strand's z changes by the same amount each
+  // frame, so the order only breaks where one is recycled; see the frame loop.
+  strands.sort((a, b) => b.z - a.z);
 
   let last = 0;
 
@@ -106,51 +190,70 @@
     // frame-rate-independent time step (1 == a 60fps frame), clamped for tab-switches
     const dt = last ? Math.min(3, (ts - last) / 16.667) : 1;
     last = ts;
-    // fade previous frame -> motion trails
-    ctx.fillStyle = 'rgba(0,0,0,0.20)';
+
+    // 0 -> 1 as we push past cruising speed; drives fog, lens and colour
+    const warp = Math.max(0, Math.min(1, (speed - 18) / 30));
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    // fade previous frame -> motion trails. Faster travel = weaker fade = the
+    // glyphs smear into streaks on their own.
+    const fadeA = 1 - Math.pow(1 - (0.22 - 0.17 * Math.min(1, Math.abs(speed) / 50)), dt);
+    ctx.fillStyle = `rgba(0,0,0,${fadeA.toFixed(3)})`;
     ctx.fillRect(0, 0, W, H);
-    ctx.textAlign = 'center';
 
     // ease steering + speed toward their targets (frame-rate independent)
     const es = 1 - Math.pow(1 - 0.14, dt);
     const el = 1 - Math.pow(1 - 0.07, dt);
-    steerX += (steerTX - steerX) * es;
-    steerY += (steerTY - steerY) * es;
+
+    // idle autopilot (opt in with #idle=1): two slow out-of-phase drifts, for
+    // when it is left running unattended. Off by default -- the camera only
+    // moves when you steer it.
+    if (IDLE_DRIFT && ts - lastMouse > 3000) {
+      camTX = Math.sin(ts * 0.00023) * 300 + Math.sin(ts * 0.00061) * 140;
+      camTY = Math.cos(ts * 0.00017) * 200;
+    }
+    camX += (camTX - camX) * es;
+    camY += (camTY - camY) * es;
     speed += (speedTarget - speed) * el;
-    const px = cx + steerX, py = cy + steerY;
+    focal += ((FOCAL - 170 * warp) - focal) * el;   // dolly-zoom: FOV opens at speed
 
-    // draw far strands first so near ones overlap on top
-    strands.sort((a, b) => b.z - a.z);
+    ctx.textAlign = 'center';
 
-    let shadowOn = false, glowTint = -1;
+    let shadowOn = false, glowTint = -1, glowWarp = false;
+    let headN = 0, tailN = 0;   // recycled strands, always contiguous at the ends
 
-    for (const s of strands) {
+    for (let i = 0; i < strands.length; i++) {
+      const s = strands[i];
       // walk forward (scaled by dt so motion is speed-consistent at any refresh rate)
       s.z -= speed * dt;
-      s.head += s.fall * dt;
-      if (s.head > s.len) s.head -= s.len;
-      if (s.z <= NEAR) { spawn(s, true); continue; }
+      // rain runs faster when we do, so the cascade reads differently at warp
+      s.head += s.fall * (1 + speed * 0.035) * dt;
+      if (s.head > s.len) s.head %= s.len;
+      if (s.z <= NEAR) { spawn(s, 1); tailN++; continue; }
+      if (s.z > BEHIND) { spawn(s, -1); headN++; continue; }
 
-      const scale = FOCAL / s.z;
-      const sx = px + s.x * scale;
-      const sy0 = py + s.y * scale;
+      const scale = focal / s.z;
+      const sx = cx + (s.x - camX) * scale;      // parallax: depth-dependent sweep
+      const sy0 = cy + (s.y - camY) * scale;
       const size = s.gs * scale;                // per-strand thickness
       if (size < 1.5) continue;                 // too far to matter
       // cull strands that project entirely off-screen
       if (sx < -size || sx > W + size) continue;
 
-      const pal = PAL[s.tint];
+      const pal = (warp > s.wo ? PAL_W : PAL)[s.tint];
+      const isWarp = warp > s.wo;
       ctx.font = (size | 0) + 'px monospace';   // integer size -> glyph-atlas cache hit
       const depthFog = Math.min(1, (FAR - s.z) / FAR + 0.15) * s.dim; // distance + strand dimness
       const fogIdx = (depthFog * STEPS) | 0;
       const trailLen = s.len * s.trail;         // per-strand trail length
+      const mut = 1 - Math.pow(1 - s.mut, dt);  // twitchiness, not tied to refresh rate
 
       for (let k = 0; k < s.len; k++) {
         const sy = sy0 + k * size;
-        if (sy < -size || sy > H + size) continue;
+        if (sy > H + size) break;               // strand runs downward: rest is below
+        if (sy < -size) continue;
 
-        // mutate glyphs at the strand's own twitchiness
-        if (Math.random() < s.mut) s.chars[k] = pick();
+        if (mut && rng() < mut) s.chars[k] = pick();
 
         // brightness falls off behind the head
         let d = s.head - k;
@@ -159,7 +262,9 @@
         if (d < 0.6) {                          // bright leading glyph
           ctx.fillStyle = pal.head[fogIdx];
           const wantGlow = size >= SHADOW_MIN;  // skip the costly blur on tiny far heads
-          if (wantGlow && glowTint !== s.tint) { ctx.shadowColor = pal.glow; glowTint = s.tint; }
+          if (wantGlow && (glowTint !== s.tint || glowWarp !== isWarp)) {
+            ctx.shadowColor = pal.glow; glowTint = s.tint; glowWarp = isWarp;
+          }
           if (wantGlow !== shadowOn) { ctx.shadowBlur = wantGlow ? 8 : 0; shadowOn = wantGlow; }
         } else {
           if (shadowOn) { ctx.shadowBlur = 0; shadowOn = false; }
@@ -171,23 +276,42 @@
       }
     }
     if (shadowOn) ctx.shadowBlur = 0;
+
+    // Restore the far -> near invariant without a full sort: strands that flew
+    // past us are the tail (smallest z) and belong at the front, and vice versa.
+    if (headN || tailN) {
+      const head = strands.splice(0, headN);
+      const tail = tailN ? strands.splice(strands.length - tailN, tailN) : [];
+      if (tail.length) strands.unshift(...tail);
+      if (head.length) strands.push(...head);
+    }
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
 
-  // --- controls (mouse steers, scroll / W-S set speed, space warps) ---
+  // --- controls -------------------------------------------------------------
   // The frame loop eases toward these targets, so the response stays smooth.
   window.addEventListener('mousemove', (e) => {
-    steerTX = (e.clientX - cx) * 0.6;
-    steerTY = (e.clientY - cy) * 0.6;
+    lastMouse = performance.now();
+    camTX = (e.clientX / W - 0.5) * 2 * 520;
+    camTY = (e.clientY / H - 0.5) * 2 * 380;
   });
   window.addEventListener('wheel', (e) => {
     speedTarget = Math.min(60, Math.max(-20, speedTarget - e.deltaY * 0.02));
   }, { passive: true });
   window.addEventListener('keydown', (e) => {
-    if (e.key === 'w' || e.key === 'ArrowUp') speedTarget = Math.min(60, speedTarget + 2);
-    if (e.key === 's' || e.key === 'ArrowDown') speedTarget = Math.max(-20, speedTarget - 2);
-    if (e.code === 'Space') speedTarget = speedTarget > 30 ? 6 : 45;   // warp toggle
+    const k = e.key.toLowerCase();
+    if (k === 'w' || e.key === 'ArrowUp') speedTarget = Math.min(60, speedTarget + 2);
+    if (k === 's' || e.key === 'ArrowDown') speedTarget = Math.max(-20, speedTarget - 2);
+    if (e.code === 'Space') { e.preventDefault(); speedTarget = speedTarget > 30 ? 6 : 45; }  // warp toggle
+    if (k === 'c') setPalette(NAMES[(NAMES.indexOf(paletteName) + 1) % NAMES.length]);
+    if (k === 'h') hud.classList.toggle('off');
+    if (k === 'p') {
+      const a = document.createElement('a');
+      a.download = `matrix-${SEED_STR}-${Date.now()}.png`;
+      a.href = canvas.toDataURL('image/png');
+      a.click();
+    }
   });
 </script>
 </body>
