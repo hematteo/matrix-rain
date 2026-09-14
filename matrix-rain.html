@@ -18,6 +18,13 @@
   #hud b { color: #ffffffd0; }
   #hud .seed { display: block; opacity: 0.6; }
   #hud.off { display: none; }
+  /* Bloom rides on its own layer. Drawing it into the scene canvas would feed
+     it back through the trail fade every frame and run away. */
+  #bloom {
+    position: fixed; inset: 0; width: 100%; height: 100%;
+    pointer-events: none; mix-blend-mode: screen;
+  }
+  #bloom.off { display: none; }
   /* vignette + faint scanlines: DOM layers, so they cost nothing per frame */
   #fx {
     position: fixed; inset: 0; pointer-events: none;
@@ -34,10 +41,11 @@
 </head>
 <body>
 <canvas id="matrix"></canvas>
+<canvas id="bloom"></canvas>
 <div id="fx"></div>
 <div id="dbg" hidden></div>
 <div id="hud">
-  move <b>mouse</b> to steer &nbsp;·&nbsp; <b>scroll</b> / <b>W</b>/<b>S</b> speed &nbsp;·&nbsp; <b>space</b> warp &nbsp;·&nbsp; <b>C</b> palette &nbsp;·&nbsp; <b>M</b> classic/fly &nbsp;·&nbsp; <b>F</b> fullscreen &nbsp;·&nbsp; <b>V</b> effects &nbsp;·&nbsp; <b>P</b> save &nbsp;·&nbsp; <b>H</b> hide
+  move <b>mouse</b> to steer &nbsp;·&nbsp; <b>scroll</b> / <b>W</b>/<b>S</b> speed &nbsp;·&nbsp; <b>space</b> warp &nbsp;·&nbsp; <b>C</b> palette &nbsp;·&nbsp; <b>M</b> classic/fly &nbsp;·&nbsp; <b>F</b> fullscreen &nbsp;·&nbsp; <b>V</b> effects &nbsp;·&nbsp; <b>B</b> bloom &nbsp;·&nbsp; <b>P</b> save &nbsp;·&nbsp; <b>H</b> hide
   <span class="seed" id="seedline"></span>
 </div>
 <script>
@@ -184,6 +192,13 @@
   let qi = 0;
   let ftEma = 16.7, workEma = 4;    // ms: rAF interval, and our own CPU time per frame
   let lastStep = 0, upWait = 4000, lastDbg = 0;
+  // The film's glyphs sit in heavy, soft bloom; a per-head sprite is far
+  // tighter than that. Quarter-resolution blur of the whole frame, screened
+  // back over it. Off on touch devices and whenever the governor steps down.
+  const bloomCtx = bloom.getContext('2d');
+  const BLOOM_DIV = 4;
+  const BLOOM = Math.max(0, Math.min(1, P.get('bloom') === null ? (TOUCH ? 0 : 0.5) : +P.get('bloom') || 0));
+  let bloomOff = BLOOM <= 0;
   const DEBUG = P.get('debug') === '1';
   dbg.hidden = !DEBUG;
   if (TOUCH) fx.classList.add('off');  // the overlay is pure fill-rate on a phone
@@ -193,6 +208,9 @@
     W = window.innerWidth; H = window.innerHeight;
     canvas.width = W * dpr; canvas.height = H * dpr;   // render at native pixels
     canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+    // CSS stretches the small bloom buffer back up, which smooths it for free
+    bloom.width = Math.max(1, (W * dpr / BLOOM_DIV) | 0);
+    bloom.height = Math.max(1, (H * dpr / BLOOM_DIV) | 0);
     cx = W / 2; cy = H / 2;
   }
   resize();
@@ -525,12 +543,23 @@
       if (head.length) strands.push(...head);
     }
 
+    const bloomOn = !bloomOff && qi === 0;
+    bloom.classList.toggle('off', !bloomOn);
+    if (bloomOn) {
+      bloomCtx.clearRect(0, 0, bloom.width, bloom.height);
+      bloomCtx.filter = 'blur(2px)';        // 2px at quarter res ~ 8px on screen
+      bloomCtx.globalAlpha = BLOOM;
+      bloomCtx.drawImage(canvas, 0, 0, bloom.width, bloom.height);
+      bloomCtx.filter = 'none';
+    }
+
     workEma += (performance.now() - t0 - workEma) * 0.1;
     if (DEBUG && ts - lastDbg > 250) {
       lastDbg = ts;
       dbg.textContent = `${ftEma.toFixed(1)} ms/frame · ${workEma.toFixed(1)} ms cpu · `
         + `${nGlyph} glyphs · ${nGlow} glows · ${(W * dpr) | 0}×${(H * dpr) | 0} @${dpr.toFixed(2)} · q${QUALITY[qi]}`
-        + ` · latin ${MONO_SIZE.toFixed(2)}x${SQUEEZE ? ' squeezed ' + MONO_SQUEEZE.toFixed(2) : ''}`;
+        + ` · latin ${MONO_SIZE.toFixed(2)}x${SQUEEZE ? ' squeezed ' + MONO_SQUEEZE.toFixed(2) : ''}`
+        + ` · bloom ${bloomOn ? BLOOM.toFixed(2) : 'off'}`;
     }
     requestAnimationFrame(frame);
   }
@@ -557,6 +586,7 @@
     if (k === 'h') hud.classList.toggle('off');
     if (k === 'm') setMode(MODE === 'classic' ? 'fly' : 'classic');
     if (k === 'v') fx.classList.toggle('off');
+    if (k === 'b') bloomOff = !bloomOff;
     if (k === 'f') document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
     if (k === 'p') {
       const a = document.createElement('a');
