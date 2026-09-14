@@ -4,9 +4,17 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Matrix Digital Rain — Walkthrough</title>
+<meta name="description" content="An interactive Matrix digital rain: fly through the code, or watch it fall flat like the film. Every field is grown from a seed you choose.">
+<meta name="theme-color" content="#000000">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23000'/%3E%3Ctext x='16' y='24' font-family='monospace' font-size='24' fill='%2300e04a' text-anchor='middle'%3E%EF%BE%8A%3C/text%3E%3C/svg%3E">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Matrix Digital Rain">
+<meta property="og:description" content="Fly through the code, or watch it fall flat like the film. Every field is grown from a seed you choose.">
+<meta property="og:image" content="preview.png">
+<meta name="twitter:card" content="summary_large_image">
 <style>
   html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; }
-  canvas { display: block; cursor: crosshair; }
+  canvas { display: block; cursor: crosshair; touch-action: none; }
   body.idle canvas { cursor: none; }      /* the reticle leaves when your hand stops */
   #hud {
     position: fixed; left: 14px; bottom: 12px;
@@ -18,6 +26,17 @@
   #hud b { color: #ffffffd0; }
   #hud .seed { display: block; opacity: 0.6; }
   #hud.off { display: none; }
+  #pad {
+    position: fixed; right: 12px; bottom: 12px; display: flex; gap: 8px;
+    font: 13px/1 monospace; user-select: none;
+  }
+  #pad button {
+    background: #ffffff14; color: #ffffffcc; border: 1px solid #ffffff2e;
+    border-radius: 7px; padding: 11px 14px; font: inherit; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #pad button:active { background: #ffffff33; }
+  #hud.off ~ #pad { display: none; }
   /* Bloom rides on its own layer. Drawing it into the scene canvas would feed
      it back through the trail fade every frame and run away. */
   #bloom {
@@ -45,8 +64,12 @@
 <div id="fx"></div>
 <div id="dbg" hidden></div>
 <div id="hud">
-  move <b>mouse</b> to steer &nbsp;·&nbsp; <b>scroll</b> / <b>W</b>/<b>S</b> speed &nbsp;·&nbsp; <b>space</b> warp &nbsp;·&nbsp; <b>C</b> palette &nbsp;·&nbsp; <b>M</b> classic/fly &nbsp;·&nbsp; <b>F</b> fullscreen &nbsp;·&nbsp; <b>V</b> effects &nbsp;·&nbsp; <b>B</b> bloom &nbsp;·&nbsp; <b>P</b> save &nbsp;·&nbsp; <b>H</b> hide
+  <span id="keys">move <b>mouse</b> to steer &nbsp;·&nbsp; <b>scroll</b> / <b>W</b>/<b>S</b> speed &nbsp;·&nbsp; <b>space</b> warp &nbsp;·&nbsp; <b>C</b> palette &nbsp;·&nbsp; <b>M</b> classic/fly &nbsp;·&nbsp; <b>F</b> fullscreen &nbsp;·&nbsp; <b>V</b> effects &nbsp;·&nbsp; <b>B</b> bloom &nbsp;·&nbsp; <b>P</b> save &nbsp;·&nbsp; <b>H</b> hide</span>
+  <span id="taps" hidden><b>drag</b> to steer &nbsp;·&nbsp; <b>two fingers</b> up/down for speed &nbsp;·&nbsp; <b>double-tap</b> to warp</span>
   <span class="seed" id="seedline"></span>
+</div>
+<div id="pad" hidden>
+  <button data-k="m">mode</button><button data-k="c">colour</button><button data-k=" ">warp</button><button data-k="h">hide</button>
 </div>
 <script>
   const canvas = document.getElementById('matrix');
@@ -58,6 +81,12 @@
   const SEED_STR = P.get('seed') || 'matrix';
   const MSG = (P.get('msg') || '').toUpperCase();
   let MODE = P.get('mode') === 'classic' ? 'classic' : 'fly';   // 'fly' = 3D corridor, 'classic' = the film
+  // Flying the camera through a field is exactly the parallax that triggers
+  // motion sickness, so honour the OS setting: start flat, and stop the glyphs
+  // flashing when they change. #motion=1 overrides.
+  const REDUCED = typeof matchMedia === 'function'
+    && matchMedia('(prefers-reduced-motion: reduce)').matches && P.get('motion') !== '1';
+  if (REDUCED && !P.get('mode')) MODE = 'classic';
 
   // FNV-1a -> mulberry32: same seed string always grows the same field.
   const hash32 = (str) => {
@@ -486,6 +515,7 @@
           // the message decodes under your gaze and re-encrypts when it leaves
           if (rng() < (0.03 + 0.35 * gaze) * dt) { s.chars[k] = rng() < 0.3 + 0.7 * gaze ? MSG[k] : pick(); j = 1.7; }
         } else if (mut && rng() < mut) { s.chars[k] = pick(); j = 1.7; }
+        if (REDUCED && j > 1) j = 1;            // no flash on change
         if (j > 1) { j -= 0.1 * dt; if (j <= 1) j = 0.55 + 0.45 * rng(); }
         s.jit[k] = j;
 
@@ -567,21 +597,17 @@
 
   // --- controls -------------------------------------------------------------
   // The frame loop eases toward these targets, so the response stays smooth.
-  window.addEventListener('mousemove', (e) => {
+  function steer(x, y) {
     lastMouse = performance.now();
-    mx = W - e.clientX; my = e.clientY;        // the frame is mirrored; so is the cursor
-    camTX = (0.5 - e.clientX / W) * 2 * 520;
-    camTY = (e.clientY / H - 0.5) * 2 * 380;
-  });
-  document.addEventListener('mouseleave', () => { mx = my = -1e9; });   // gaze off when the cursor leaves
-  window.addEventListener('wheel', (e) => {
-    speedTarget = Math.min(60, Math.max(-20, speedTarget - e.deltaY * 0.02));
-  }, { passive: true });
-  window.addEventListener('keydown', (e) => {
-    const k = e.key.toLowerCase();
-    if (k === 'w' || e.key === 'ArrowUp') speedTarget = Math.min(60, speedTarget + 2);
-    if (k === 's' || e.key === 'ArrowDown') speedTarget = Math.max(-20, speedTarget - 2);
-    if (e.code === 'Space') { e.preventDefault(); speedTarget = speedTarget > 30 ? 6 : 45; }  // warp toggle
+    mx = W - x; my = y;                        // the frame is mirrored; so is the cursor
+    camTX = (0.5 - x / W) * 2 * 520;
+    camTY = (y / H - 0.5) * 2 * 380;
+  }
+  // every control routes through here, so keys and on-screen buttons agree
+  function act(k) {
+    if (k === 'w' || k === 'arrowup') speedTarget = Math.min(60, speedTarget + 2);
+    if (k === 's' || k === 'arrowdown') speedTarget = Math.max(-20, speedTarget - 2);
+    if (k === ' ') speedTarget = speedTarget > 30 ? 6 : 45;              // warp toggle
     if (k === 'c') setPalette(NAMES[(NAMES.indexOf(paletteName) + 1) % NAMES.length]);
     if (k === 'h') hud.classList.toggle('off');
     if (k === 'm') setMode(MODE === 'classic' ? 'fly' : 'classic');
@@ -594,7 +620,48 @@
       a.href = canvas.toDataURL('image/png');
       a.click();
     }
+  }
+
+  window.addEventListener('mousemove', (e) => steer(e.clientX, e.clientY));
+  document.addEventListener('mouseleave', () => { mx = my = -1e9; });   // gaze off when the cursor leaves
+  window.addEventListener('wheel', (e) => {
+    speedTarget = Math.min(60, Math.max(-20, speedTarget - e.deltaY * 0.02));
+  }, { passive: true });
+  window.addEventListener('keydown', (e) => {
+    const k = e.code === 'Space' ? ' ' : e.key.toLowerCase();
+    if (k === ' ') e.preventDefault();
+    act(k);
   });
+
+  // --- touch ----------------------------------------------------------------
+  // One finger steers, two fingers slide the speed, a double-tap warps. Without
+  // this a phone gets a fixed camera and a HUD naming keys it does not have.
+  if (TOUCH) {
+    keys.hidden = true; taps.hidden = false; pad.hidden = false;
+    pad.addEventListener('click', (e) => { const k = e.target.dataset && e.target.dataset.k; if (k) act(k); });
+    let pinchY = null, pinchSpeed = 0, lastTap = 0;
+    const midY = (t) => (t[0].clientY + t[1].clientY) / 2;
+    canvas.addEventListener('touchstart', (e) => {
+      if (e.touches.length === 1) steer(e.touches[0].clientX, e.touches[0].clientY);
+      else if (e.touches.length === 2) { pinchY = midY(e.touches); pinchSpeed = speedTarget; }
+    }, { passive: true });
+    canvas.addEventListener('touchmove', (e) => {
+      e.preventDefault();                       // no page scroll or pinch-zoom
+      if (e.touches.length === 1 && pinchY === null) steer(e.touches[0].clientX, e.touches[0].clientY);
+      else if (e.touches.length === 2) {        // drag up to speed up
+        speedTarget = Math.min(60, Math.max(-20, pinchSpeed + (pinchY - midY(e.touches)) * 0.12));
+      }
+    }, { passive: false });
+    canvas.addEventListener('touchend', (e) => {
+      if (e.touches.length === 0) {
+        if (pinchY === null) {                  // a tap, not the end of a pinch
+          const now = performance.now();
+          if (now - lastTap < 320) { act(' '); lastTap = 0; } else lastTap = now;
+        }
+        pinchY = null;
+      }
+    }, { passive: true });
+  }
 </script>
 </body>
 </html>
