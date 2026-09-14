@@ -426,6 +426,11 @@
       const mut = 1 - Math.pow(1 - s.mut * (1 + 6 * gaze), dt);
       let headK = -1, headY = 0;                // the bright glyph is drawn last, on top
       let qn = 0;                               // queued Latin glyphs
+      // The frame is mirrored like the film, which leaves the message reading
+      // backwards. Flip these strands back about their own axis so the noise
+      // stays film-accurate but the message you chose is legible.
+      const gx = s.msg ? 0 : sx;
+      if (s.msg) { ctx.save(); ctx.translate(sx, 0); ctx.scale(-1, 1); }
 
       for (let k = 0; k < s.len; k++) {
         const sy = sy0 + k * size;
@@ -451,14 +456,14 @@
         const ch = s.chars[k];
         if (USE_CJK[ch.charCodeAt(0)]) {
           ctx.globalAlpha = bright;
-          ctx.fillText(ch, sx, sy); nGlyph++;
+          ctx.fillText(ch, gx, sy); nGlyph++;
         } else if (qn < 1024) {
           qCh[qn] = ch; qY[qn] = sy; qA[qn] = bright; qn++;
         }
       }
       if (qn) {
         ctx.font = fMono;
-        for (let q = 0; q < qn; q++) { ctx.globalAlpha = qA[q]; ctx.fillText(qCh[q], sx, qY[q]); nGlyph++; }
+        for (let q = 0; q < qn; q++) { ctx.globalAlpha = qA[q]; ctx.fillText(qCh[q], gx, qY[q]); nGlyph++; }
         ctx.font = fCjk;
       }
       if (headK >= 0) {
@@ -466,14 +471,15 @@
           // glow blooms as a strand comes at you, and a little under the cursor
           const gr = size * (0.7 + 1.3 * near + 0.4 * gaze);
           ctx.globalAlpha = depthFog * (0.35 + 0.4 * near);   // soft core, not a bloom
-          ctx.drawImage(pal.glow, sx - gr, headY - gr, gr * 2, gr * 2); nGlow++;
+          ctx.drawImage(pal.glow, gx - gr, headY - gr, gr * 2, gr * 2); nGlow++;
         }
         const hc = s.chars[headK];
         if (!USE_CJK[hc.charCodeAt(0)]) ctx.font = fMono;
         ctx.fillStyle = pal.head;
         ctx.globalAlpha = depthFog;
-        ctx.fillText(hc, sx, headY); nGlyph++;
+        ctx.fillText(hc, gx, headY); nGlyph++;
       }
+      if (s.msg) ctx.restore();
     }
     ctx.globalAlpha = 1;
 
