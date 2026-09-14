@@ -7,20 +7,32 @@
 <style>
   html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; }
   canvas { display: block; cursor: crosshair; }
+  body.idle canvas { cursor: none; }      /* the reticle leaves when your hand stops */
   #hud {
     position: fixed; left: 14px; bottom: 12px;
     font: 12px/1.5 monospace; color: #ffffff88;
     text-shadow: 0 0 6px #00000099; pointer-events: none; user-select: none;
+    transition: opacity 0.7s;
   }
+  body.idle #hud { opacity: 0; }
   #hud b { color: #ffffffd0; }
   #hud .seed { display: block; opacity: 0.6; }
   #hud.off { display: none; }
+  /* vignette + faint scanlines: DOM layers, so they cost nothing per frame */
+  #fx {
+    position: fixed; inset: 0; pointer-events: none;
+    background:
+      radial-gradient(ellipse at center, transparent 48%, rgba(0,0,0,0.62) 100%),
+      repeating-linear-gradient(0deg, rgba(0,0,0,0.10) 0 1px, transparent 1px 3px);
+  }
+  #fx.off { display: none; }
 </style>
 </head>
 <body>
 <canvas id="matrix"></canvas>
+<div id="fx"></div>
 <div id="hud">
-  move <b>mouse</b> to steer &nbsp;·&nbsp; <b>scroll</b> / <b>W</b>/<b>S</b> speed &nbsp;·&nbsp; <b>space</b> warp &nbsp;·&nbsp; <b>C</b> palette &nbsp;·&nbsp; <b>P</b> save &nbsp;·&nbsp; <b>H</b> hide
+  move <b>mouse</b> to steer &nbsp;·&nbsp; <b>scroll</b> / <b>W</b>/<b>S</b> speed &nbsp;·&nbsp; <b>space</b> warp &nbsp;·&nbsp; <b>C</b> palette &nbsp;·&nbsp; <b>F</b> fullscreen &nbsp;·&nbsp; <b>V</b> effects &nbsp;·&nbsp; <b>P</b> save &nbsp;·&nbsp; <b>H</b> hide
   <span class="seed" id="seedline"></span>
 </div>
 <script>
@@ -63,6 +75,10 @@
   const BEHIND = FAR;       // reversing past this recycles a strand to the near plane
   const GLYPH_SPACING = 26; // world-space vertical gap between glyphs in a strand
   const FIELD = 1400;       // how far strands spread from the centre axis
+  const NEAR_FADE = 90;     // strands dissolve over this much depth before the near plane
+  const FAR_FADE = 240;     // ...and emerge from black over this much depth after spawning
+  const GAZE_R = 150;       // px: glyphs this close to the cursor wake up
+  let mx = -1e9, my = -1e9; // cursor in CSS px; off-screen until the mouse moves
 
   // The camera moves through the field; strands are NOT panned on screen. That
   // is what buys depth-dependent parallax: near strands sweep, far ones drift.
@@ -73,7 +89,8 @@
   let speedTarget = 6, speed = 6;   // forward walking speed (world units / frame)
 
   const IDLE_DRIFT = P.get('idle') === '1';
-  let lastMouse = -1e9;     // autopilot takes over after a few idle seconds
+  let lastMouse = performance.now(); // idle timer: hides the cursor + HUD, gates autopilot
+  let wasIdle = false;
 
   function resize() {
     dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -149,8 +166,15 @@
   setPalette(paletteName);
 
   function spawn(s, where) {
-    s.x = rand(-FIELD, FIELD);
-    s.y = rand(-FIELD, FIELD);
+    // A corridor, not a cube: most strands live in an annulus around the axis
+    // so walls stream past on either side and the centre stays open where you
+    // look. A few sit in the middle so it never reads as empty.
+    const ang = rand(0, Math.PI * 2);
+    const r = rng() < 0.12
+      ? FIELD * 0.4 * Math.sqrt(rng())                                  // centre disk
+      : FIELD * Math.sqrt(rng() * (1.05 * 1.05 - 0.4 * 0.4) + 0.4 * 0.4); // uniform in annulus
+    s.x = Math.cos(ang) * r;
+    s.y = Math.sin(ang) * r;
     // `where`: 0 = anywhere (startup), 1 = far edge, -1 = just in front of us
     // Recycled strands land on an exact plane: any jitter here would break the
     // far -> near ordering the frame loop relies on instead of sorting.
@@ -167,12 +191,12 @@
     s.wo = rng();                 // warp threshold -> the field bleaches unevenly
     s.msg = false;
     if (!s.chars) s.chars = [];
-    // A few strands carry the message instead of noise: frozen glyphs, long
-    // trail, so the whole word stays lit and reads as it flies past.
+    // A few strands carry the message: long trail so the whole word stays lit.
+    // It starts mostly encrypted and decodes under your gaze (see frame loop).
     if (MSG && rng() < 0.03) {
       s.msg = true; s.len = MSG.length; s.mut = 0; s.trail = 3;
       s.dim = 1; s.fall = 0.05; s.gs = GLYPH_SPACING * rand(1.0, 1.4);
-      for (let i = 0; i < s.len; i++) s.chars[i] = MSG[i];
+      for (let i = 0; i < s.len; i++) s.chars[i] = rng() < 0.3 ? MSG[i] : pick();
     } else {
       for (let i = 0; i < s.len; i++) s.chars[i] = pick();
     }
@@ -219,7 +243,10 @@
 
     ctx.textAlign = 'center';
 
-    let shadowOn = false, glowTint = -1, glowWarp = false;
+    const idle = ts - lastMouse > 2500;
+    if (idle !== wasIdle) { document.body.classList.toggle('idle', idle); wasIdle = idle; }
+
+    let shadowBlur = 0, glowTint = -1, glowWarp = false;
     let headN = 0, tailN = 0;   // recycled strands, always contiguous at the ends
 
     for (let i = 0; i < strands.length; i++) {
@@ -240,20 +267,34 @@
       // cull strands that project entirely off-screen
       if (sx < -size || sx > W + size) continue;
 
+      // nothing pops: dissolve through the near plane, emerge from the far one
+      const edge = Math.min(1, (s.z - NEAR) / NEAR_FADE, (FAR - s.z) / FAR_FADE);
+      const near = 1 - Math.min(1, (s.z - NEAR) / 220);   // 0 far .. 1 about to pass us
+      // gaze: 0 far from the cursor .. 1 under it (distance to the strand's extent)
+      const gdy = my < sy0 ? sy0 - my : Math.max(0, my - (sy0 + s.len * size));
+      const gaze = Math.max(0, 1 - Math.hypot(sx - mx, gdy) / GAZE_R);
+
+      const depthFog = Math.min(1, (Math.min(1, (FAR - s.z) / FAR + 0.15) * s.dim + 0.45 * gaze) * edge);
+      if (depthFog < 0.02) continue;            // still black: skip the draw calls
       const pal = (warp > s.wo ? PAL_W : PAL)[s.tint];
       const isWarp = warp > s.wo;
       ctx.font = (size | 0) + 'px monospace';   // integer size -> glyph-atlas cache hit
-      const depthFog = Math.min(1, (FAR - s.z) / FAR + 0.15) * s.dim; // distance + strand dimness
       const fogIdx = (depthFog * STEPS) | 0;
       const trailLen = s.len * s.trail;         // per-strand trail length
-      const mut = 1 - Math.pow(1 - s.mut, dt);  // twitchiness, not tied to refresh rate
+      // twitchiness, not tied to refresh rate; glyphs under the cursor churn harder
+      const mut = 1 - Math.pow(1 - s.mut * (1 + 6 * gaze), dt);
+      // glow blooms as a strand comes at you, and a little under the cursor
+      const wantBlur = size >= SHADOW_MIN ? ((8 + 26 * near + 8 * gaze) * dpr) | 0 : 0;
 
       for (let k = 0; k < s.len; k++) {
         const sy = sy0 + k * size;
         if (sy > H + size) break;               // strand runs downward: rest is below
         if (sy < -size) continue;
 
-        if (mut && rng() < mut) s.chars[k] = pick();
+        if (s.msg) {
+          // the message decodes under your gaze and re-encrypts when it leaves
+          if (rng() < (0.03 + 0.35 * gaze) * dt) s.chars[k] = rng() < 0.3 + 0.7 * gaze ? MSG[k] : pick();
+        } else if (mut && rng() < mut) s.chars[k] = pick();
 
         // brightness falls off behind the head
         let d = s.head - k;
@@ -261,13 +302,12 @@
 
         if (d < 0.6) {                          // bright leading glyph
           ctx.fillStyle = pal.head[fogIdx];
-          const wantGlow = size >= SHADOW_MIN;  // skip the costly blur on tiny far heads
-          if (wantGlow && (glowTint !== s.tint || glowWarp !== isWarp)) {
+          if (wantBlur && (glowTint !== s.tint || glowWarp !== isWarp)) {
             ctx.shadowColor = pal.glow; glowTint = s.tint; glowWarp = isWarp;
           }
-          if (wantGlow !== shadowOn) { ctx.shadowBlur = wantGlow ? 8 : 0; shadowOn = wantGlow; }
+          if (wantBlur !== shadowBlur) { ctx.shadowBlur = wantBlur; shadowBlur = wantBlur; }
         } else {
-          if (shadowOn) { ctx.shadowBlur = 0; shadowOn = false; }
+          if (shadowBlur) { ctx.shadowBlur = 0; shadowBlur = 0; }
           const bright = (1 - d / trailLen) * depthFog;
           if (bright <= 0) continue;
           ctx.fillStyle = pal.body[(bright * STEPS) | 0];
@@ -275,7 +315,7 @@
         ctx.fillText(s.chars[k], sx, sy);
       }
     }
-    if (shadowOn) ctx.shadowBlur = 0;
+    if (shadowBlur) ctx.shadowBlur = 0;
 
     // Restore the far -> near invariant without a full sort: strands that flew
     // past us are the tail (smallest z) and belong at the front, and vice versa.
@@ -293,9 +333,11 @@
   // The frame loop eases toward these targets, so the response stays smooth.
   window.addEventListener('mousemove', (e) => {
     lastMouse = performance.now();
+    mx = e.clientX; my = e.clientY;
     camTX = (e.clientX / W - 0.5) * 2 * 520;
     camTY = (e.clientY / H - 0.5) * 2 * 380;
   });
+  document.addEventListener('mouseleave', () => { mx = my = -1e9; });   // gaze off when the cursor leaves
   window.addEventListener('wheel', (e) => {
     speedTarget = Math.min(60, Math.max(-20, speedTarget - e.deltaY * 0.02));
   }, { passive: true });
@@ -306,6 +348,8 @@
     if (e.code === 'Space') { e.preventDefault(); speedTarget = speedTarget > 30 ? 6 : 45; }  // warp toggle
     if (k === 'c') setPalette(NAMES[(NAMES.indexOf(paletteName) + 1) % NAMES.length]);
     if (k === 'h') hud.classList.toggle('off');
+    if (k === 'v') fx.classList.toggle('off');
+    if (k === 'f') document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
     if (k === 'p') {
       const a = document.createElement('a');
       a.download = `matrix-${SEED_STR}-${Date.now()}.png`;
