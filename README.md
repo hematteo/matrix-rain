@@ -52,3 +52,7 @@ The glyphs are half-width katakana drawn mirrored, as in the film. Latin comes f
 Rendering adapts to the device: a frame-time governor steps the render scale and far-cull down when frames are dropped and back up when there is headroom, and bloom is dropped on the first step down.
 
 `prefers-reduced-motion` starts the page in classic mode — no camera travel — and stops glyphs flashing when they change.
+
+## Licence
+
+[CC BY-NC-SA 4.0](LICENSE) — share and remix with attribution, non-commercial, share alike.
