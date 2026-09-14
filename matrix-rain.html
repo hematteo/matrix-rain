@@ -37,7 +37,7 @@
 <div id="fx"></div>
 <div id="dbg" hidden></div>
 <div id="hud">
-  move <b>mouse</b> to steer &nbsp;·&nbsp; <b>scroll</b> / <b>W</b>/<b>S</b> speed &nbsp;·&nbsp; <b>space</b> warp &nbsp;·&nbsp; <b>C</b> palette &nbsp;·&nbsp; <b>F</b> fullscreen &nbsp;·&nbsp; <b>V</b> effects &nbsp;·&nbsp; <b>P</b> save &nbsp;·&nbsp; <b>H</b> hide
+  move <b>mouse</b> to steer &nbsp;·&nbsp; <b>scroll</b> / <b>W</b>/<b>S</b> speed &nbsp;·&nbsp; <b>space</b> warp &nbsp;·&nbsp; <b>C</b> palette &nbsp;·&nbsp; <b>M</b> classic/fly &nbsp;·&nbsp; <b>F</b> fullscreen &nbsp;·&nbsp; <b>V</b> effects &nbsp;·&nbsp; <b>P</b> save &nbsp;·&nbsp; <b>H</b> hide
   <span class="seed" id="seedline"></span>
 </div>
 <script>
@@ -49,6 +49,7 @@
   const P = new URLSearchParams(location.hash.slice(1));
   const SEED_STR = P.get('seed') || 'matrix';
   const MSG = (P.get('msg') || '').toUpperCase();
+  let MODE = P.get('mode') === 'classic' ? 'classic' : 'fly';   // 'fly' = 3D corridor, 'classic' = the film
 
   // FNV-1a -> mulberry32: same seed string always grows the same field.
   const hash32 = (str) => {
@@ -124,7 +125,7 @@
     cx = W / 2; cy = H / 2;
   }
   resize();
-  window.addEventListener('resize', resize);
+  window.addEventListener('resize', () => { resize(); if (MODE === 'classic') setMode(MODE); });
 
   // --- colour ---------------------------------------------------------------
   // A palette is one hue with four strand "personalities" hung off it: mostly
@@ -181,7 +182,7 @@
     TINTS = makeTints(hueFor(name));
     PAL = buildPal(TINTS, false);
     PAL_W = buildPal(TINTS, true);
-    seedline.textContent = `seed "${SEED_STR}" · ${name} · ${NUM} strands` + (MSG ? ` · "${MSG}"` : '');
+    seedline.textContent = `${MODE} · seed "${SEED_STR}" · ${name} · ${NUM} strands` + (MSG ? ` · "${MSG}"` : '');
   }
   function pickTint() {
     let r = rng();
@@ -196,40 +197,66 @@
   const strands = [];
   setPalette(paletteName);
 
+  // --- classic mode: what the film actually shows -------------------------
+  // Fixed columns on a glyph grid, a few depth planes, no forward travel. The
+  // same strand machinery runs; only the geometry and the recycling differ.
+  const PLANES = [{ z: 420, w: 0.55 }, { z: 720, w: 0.30 }, { z: 1150, w: 0.15 }];
+  const PITCH = GLYPH_SPACING * 0.8;   // column pitch in world units (about one glyph width)
+
   function spawn(s, where) {
-    // A corridor, not a cube: most strands live in an annulus around the axis
-    // so walls stream past on either side and the centre stays open where you
-    // look. A few sit in the middle so it never reads as empty.
-    const ang = rand(0, Math.PI * 2);
-    const r = rng() < 0.12
-      ? FIELD * 0.4 * Math.sqrt(rng())                                  // centre disk
-      : FIELD * Math.sqrt(rng() * (1.05 * 1.05 - 0.4 * 0.4) + 0.4 * 0.4); // uniform in annulus
-    s.x = Math.cos(ang) * r;
-    s.y = Math.sin(ang) * r;
-    // `where`: 0 = anywhere (startup), 1 = far edge, -1 = just in front of us
-    // Recycled strands land on an exact plane: any jitter here would break the
-    // far -> near ordering the frame loop relies on instead of sorting.
-    s.z = where === 1 ? FAR : where === -1 ? NEAR + 1 : rand(NEAR, FAR);
-    // skewed so most strands are short-to-medium but some trail much longer
-    s.len = (6 + Math.pow(rng(), 1.8) * 64) | 0;   // ~6 to ~70
-    // A column goes dark between drops: the head runs past the end into a gap,
-    // the trail fades out, then the next drop starts from the top.
-    s.gap = rand(0, 0.8) * s.len;
+    if (!s.chars) { s.chars = []; s.jit = []; }
+    s.msg = false;
+    if (MODE === 'classic') {
+      // `where` 2 = a drop that finished: keep the plane (and so the depth order)
+      if (where !== 2) {
+        let r = rng(); s.z = PLANES[PLANES.length - 1].z;
+        for (const p of PLANES) { r -= p.w; if (r <= 0) { s.z = p.z; break; } }
+      }
+      const scale = FOCAL / s.z;
+      const R = (W / 2 + 560) / scale;                 // covers the screen at this plane, steering included
+      s.x = Math.round(rand(-R, R) / PITCH) * PITCH;   // snapped to the column grid
+      s.y = -(H / 2 + 420) / scale;                    // column top stays above the screen at any steer
+      s.gs = GLYPH_SPACING;
+      s.len = Math.ceil(H / (GLYPH_SPACING * scale)) + 34;
+      s.trail = rand(10, 28) / s.len;                  // 10-28 lit glyphs behind the head
+      s.gap = rand(0.3, 1.2) * s.len;                  // columns are dark more than they are lit
+    } else {
+      // A corridor, not a cube: most strands live in an annulus around the axis
+      // so walls stream past on either side and the centre stays open where you
+      // look. A few sit in the middle so it never reads as empty.
+      const ang = rand(0, Math.PI * 2);
+      const r = rng() < 0.12
+        ? FIELD * 0.4 * Math.sqrt(rng())                                  // centre disk
+        : FIELD * Math.sqrt(rng() * (1.05 * 1.05 - 0.4 * 0.4) + 0.4 * 0.4); // uniform in annulus
+      s.x = Math.cos(ang) * r;
+      s.y = Math.sin(ang) * r;
+      // `where`: 0 = anywhere (startup), 1 = far edge, -1 = just in front of us
+      // Recycled strands land on an exact plane: any jitter here would break the
+      // far -> near ordering the frame loop relies on instead of sorting.
+      s.z = where === 1 ? FAR : where === -1 ? NEAR + 1 : rand(NEAR, FAR);
+      // skewed so most strands are short-to-medium but some trail much longer
+      s.len = (6 + Math.pow(rng(), 1.8) * 64) | 0;   // ~6 to ~70
+      s.gs = GLYPH_SPACING * rand(0.7, 1.5);  // per-strand glyph size / thickness
+      s.trail = rand(0.45, 1.35);   // <1 short punchy trail, >1 long fading tail
+      // A column goes dark between drops: the head runs past the end into a gap,
+      // the trail fades out, then the next drop starts from the top.
+      s.gap = rand(0, 0.8) * s.len;
+    }
     s.head = rand(0, s.len + s.gap); // bright leading glyph, descends the strand
     s.fall = rand(0.08, 0.3);     // rain speed within the strand (~5-18 glyphs/s)
     s.tint = pickTint();          // colour personality
-    s.gs = GLYPH_SPACING * rand(0.7, 1.5);  // per-strand glyph size / thickness
-    s.trail = rand(0.45, 1.35);   // <1 short punchy trail, >1 long fading tail
     s.mut = rand(0.002, 0.03);    // how twitchy the glyphs are
     s.dim = rand(0.55, 1);        // overall brightness of the whole strand
     s.wo = rng();                 // warp threshold -> the field bleaches unevenly
-    s.msg = false;
-    if (!s.chars) { s.chars = []; s.jit = []; }
     // A few strands carry the message: long trail so the whole word stays lit.
     // It starts mostly encrypted and decodes under your gaze (see frame loop).
     if (MSG && rng() < 0.03) {
       s.msg = true; s.len = MSG.length; s.mut = 0; s.trail = 3; s.gap = 0.2 * s.len;
-      s.dim = 1; s.fall = 0.05; s.gs = GLYPH_SPACING * rand(1.0, 1.4);
+      s.dim = 1; s.fall = 0.05; s.head = rand(0, s.len + s.gap);
+      if (MODE === 'classic') {                      // somewhere on screen, on the grid
+        const scale = FOCAL / s.z;
+        s.y = rand(-H / 2, H / 2 - s.len * GLYPH_SPACING * scale) / scale;
+      } else s.gs = GLYPH_SPACING * rand(1.0, 1.4);
       for (let i = 0; i < s.len; i++) s.chars[i] = rng() < 0.3 ? MSG[i] : pick();
     } else {
       for (let i = 0; i < s.len; i++) s.chars[i] = pick();
@@ -238,6 +265,12 @@
     for (let i = 0; i < s.len; i++) s.jit[i] = rand(0.55, 1);
     s.chars.length = s.jit.length = s.len;
     return s;
+  }
+  function setMode(m) {
+    MODE = m;
+    for (const s of strands) spawn(s, 0);
+    strands.sort((a, b) => b.z - a.z);
+    setPalette(paletteName);
   }
   for (let i = 0; i < NUM; i++) strands.push(spawn({}, 0));
   // Sorted far -> near ONCE. Every strand's z changes by the same amount each
@@ -261,14 +294,15 @@
     const minSize = 1.5 / QUALITY[qi];          // far-cull grows as quality drops
 
     // 0 -> 1 as we push past cruising speed; drives fog, lens and colour
-    const warp = Math.max(0, Math.min(1, (speed - 18) / 30));
+    const spd = MODE === 'classic' ? 0 : speed;   // the film's rain does not travel
+    const warp = Math.max(0, Math.min(1, (spd - 18) / 30));
 
     // Mirrored, like the film: everything is drawn flipped left-to-right.
     // The cursor is mirrored in the mousemove handler so steering and gaze match.
     ctx.setTransform(-dpr, 0, 0, dpr, W * dpr, 0);
     // fade previous frame -> motion trails. Faster travel = weaker fade = the
     // glyphs smear into streaks on their own.
-    const fadeA = 1 - Math.pow(1 - (0.22 - 0.17 * Math.min(1, Math.abs(speed) / 50)), dt);
+    const fadeA = 1 - Math.pow(1 - (0.22 - 0.17 * Math.min(1, Math.abs(spd) / 50)), dt);
     ctx.fillStyle = `rgba(0,0,0,${fadeA.toFixed(3)})`;
     ctx.fillRect(0, 0, W, H);
 
@@ -299,11 +333,15 @@
     for (let i = 0; i < strands.length; i++) {
       const s = strands[i];
       // walk forward (scaled by dt so motion is speed-consistent at any refresh rate)
-      s.z -= speed * dt;
+      s.z -= spd * dt;
       // rain runs faster when we do, so the cascade reads differently at warp
-      s.head += s.fall * (1 + speed * 0.035) * dt;
+      s.head += s.fall * (1 + spd * 0.035) * dt;
       const cyc = s.len + s.gap;                // drop + dark gap
-      if (s.head >= cyc) s.head %= cyc;
+      if (s.head >= cyc) {
+        // classic: a finished drop becomes a new drop in another column, same plane
+        if (MODE === 'classic') { spawn(s, 2); continue; }
+        s.head %= cyc;
+      }
       if (s.z <= NEAR) { spawn(s, 1); tailN++; continue; }
       if (s.z > BEHIND) { spawn(s, -1); headN++; continue; }
 
@@ -408,6 +446,7 @@
     if (e.code === 'Space') { e.preventDefault(); speedTarget = speedTarget > 30 ? 6 : 45; }  // warp toggle
     if (k === 'c') setPalette(NAMES[(NAMES.indexOf(paletteName) + 1) % NAMES.length]);
     if (k === 'h') hud.classList.toggle('off');
+    if (k === 'm') setMode(MODE === 'classic' ? 'fly' : 'classic');
     if (k === 'v') fx.classList.toggle('off');
     if (k === 'f') document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
     if (k === 'p') {
