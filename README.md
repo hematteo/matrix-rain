@@ -53,6 +53,20 @@ Rendering adapts to the device: a frame-time governor steps the render scale and
 
 `prefers-reduced-motion` starts the page in classic mode — no camera travel — and stops glyphs flashing when they change.
 
+## Live
+
+Published as a hosted page from `build/artifact.html`, which is derived from
+`index.html` — never edited directly:
+
+```
+python3 tools/build-artifact.py
+```
+
+The Artifact runtime supplies its own document wrapper, so the build strips
+`<!doctype>`, `<html>`, `<head>` and `<body>` and the document-level metadata
+the host owns. Two controls are unavailable in an embedded frame and degrade
+quietly there: `P` (save a PNG) is hidden, and `F` (fullscreen) is a no-op.
+
 ## Licence
 
 [CC BY-NC-SA 4.0](LICENSE) — share and remix with attribution, non-commercial, share alike.

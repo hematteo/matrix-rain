@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Matrix Digital Rain — Walkthrough</title>
+<title>Matrix Digital Rain</title>
 <meta name="description" content="An interactive Matrix digital rain: fly through the code, or watch it fall flat like the film. Every field is grown from a seed you choose.">
 <meta name="theme-color" content="#000000">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23000'/%3E%3Ctext x='16' y='24' font-family='monospace' font-size='24' fill='%2300e04a' text-anchor='middle'%3E%EF%BE%8A%3C/text%3E%3C/svg%3E">
@@ -18,7 +18,7 @@
   canvas { display: block; cursor: crosshair; touch-action: none; }
   body.idle canvas { cursor: none; }      /* the reticle leaves when your hand stops */
   #hud {
-    position: fixed; left: 14px; bottom: 12px;
+    position: fixed; left: 16px; bottom: 12px;
     font: 12px/1.5 monospace; color: #ffffff88;
     text-shadow: 0 0 6px #00000099; pointer-events: none; user-select: none;
     transition: opacity 0.7s;
@@ -28,7 +28,7 @@
   #hud .seed { display: block; opacity: 0.6; }
   #hud.off { display: none; }
   #pad {
-    position: fixed; right: 12px; bottom: 12px; display: flex; gap: 8px;
+    position: fixed; right: 16px; bottom: 12px; display: flex; gap: 8px;
     font: 13px/1 monospace; user-select: none;
   }
   #pad button {
@@ -38,6 +38,10 @@
   }
   #pad button:active { background: #ffffff33; }
   #hud.off ~ #pad { display: none; }
+  /* on a phone the button row owns the bottom edge; lift the HUD clear of it */
+  @media (max-width: 620px) {
+    #hud { bottom: 66px; max-width: calc(100% - 32px); }
+  }
   /* Bloom rides on its own layer. Drawing it into the scene canvas would feed
      it back through the trail fade every frame and run away. */
   #bloom {
@@ -65,7 +69,7 @@
 <div id="fx"></div>
 <div id="dbg" hidden></div>
 <div id="hud">
-  <span id="keys">move <b>mouse</b> to steer &nbsp;·&nbsp; <b>scroll</b> / <b>W</b>/<b>S</b> speed &nbsp;·&nbsp; <b>space</b> warp &nbsp;·&nbsp; <b>C</b> palette &nbsp;·&nbsp; <b>M</b> classic/fly &nbsp;·&nbsp; <b>F</b> fullscreen &nbsp;·&nbsp; <b>V</b> effects &nbsp;·&nbsp; <b>B</b> bloom &nbsp;·&nbsp; <b>P</b> save &nbsp;·&nbsp; <b>H</b> hide</span>
+  <span id="keys">move <b>mouse</b> to steer &nbsp;·&nbsp; <b>scroll</b> / <b>W</b>/<b>S</b> speed &nbsp;·&nbsp; <b>space</b> warp &nbsp;·&nbsp; <b>C</b> palette &nbsp;·&nbsp; <b>M</b> classic/fly &nbsp;·&nbsp; <b>F</b> fullscreen &nbsp;·&nbsp; <b>V</b> effects &nbsp;·&nbsp; <b>B</b> bloom <span id="savehint">&nbsp;·&nbsp; <b>P</b> save</span> &nbsp;·&nbsp; <b>H</b> hide</span>
   <span id="taps" hidden><b>drag</b> to steer &nbsp;·&nbsp; <b>two fingers</b> up/down for speed &nbsp;·&nbsp; <b>double-tap</b> to warp</span>
   <span class="seed" id="seedline"></span>
 </div>
@@ -614,15 +618,30 @@
     if (k === 'm') setMode(MODE === 'classic' ? 'fly' : 'classic');
     if (k === 'v') fx.classList.toggle('off');
     if (k === 'b') bloomOff = !bloomOff;
-    if (k === 'f') document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+    // both of these are refused inside an embedded frame; fail quietly there
+    if (k === 'f') {
+      try {
+        if (document.fullscreenElement) document.exitFullscreen();
+        else document.documentElement.requestFullscreen?.()?.catch(() => {});
+      } catch (e) { /* not permitted here */ }
+    }
     if (k === 'p') {
-      const a = document.createElement('a');
-      a.download = `matrix-${SEED_STR}-${Date.now()}.png`;
-      a.href = canvas.toDataURL('image/png');
-      a.click();
+      try {
+        const a = document.createElement('a');
+        a.download = `matrix-${SEED_STR}-${Date.now()}.png`;
+        a.href = canvas.toDataURL('image/png');
+        a.click();
+      } catch (e) { /* downloads blocked */ }
     }
   }
 
+  // keystrokes only arrive once this frame has focus, which it may not have
+  // when the page is embedded; claim it on first interaction
+  // an embedded frame is never granted downloads, so stop offering the save
+  const EMBEDDED = (() => { try { return window.self !== window.top; } catch (e) { return true; } })();
+  if (EMBEDDED) savehint.hidden = true;
+  const grab = () => { try { window.focus(); } catch (e) { /* cross-origin */ } };
+  window.addEventListener('pointerdown', grab);
   window.addEventListener('mousemove', (e) => steer(e.clientX, e.clientY));
   document.addEventListener('mouseleave', () => { mx = my = -1e9; });   // gaze off when the cursor leaves
   window.addEventListener('wheel', (e) => {
