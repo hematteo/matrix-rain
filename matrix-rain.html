@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Matrix Digital Rain — Walkthrough</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { display: block; cursor: crosshair; }
+  #hud {
+    position: fixed; left: 14px; bottom: 12px;
+    font: 12px/1.5 monospace; color: #00ff41aa;
+    text-shadow: 0 0 6px #00ff4166; pointer-events: none; user-select: none;
+  }
+  #hud b { color: #cfffe0; }
+</style>
+</head>
+<body>
+<canvas id="matrix"></canvas>
+<div id="hud">
+  move <b>mouse</b> to steer &nbsp;·&nbsp; <b>scroll</b> / <b>W</b>/<b>S</b> to change speed &nbsp;·&nbsp; <b>space</b> to warp
+</div>
+<script>
+  const canvas = document.getElementById('matrix');
+  const ctx = canvas.getContext('2d');
+
+  const katakana = 'アァカサタナハマヤャラワガザダバパイィキシチニヒミリヰギジヂビピウゥクスツヌフムユュルグズブヅプエェケセテネヘメレヱゲゼデベペオォコソトノホモヨョロヲゴゾドボポヴッン';
+  const glyphs = (katakana + 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:."=*+-<>').split('');
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const pick = () => glyphs[(Math.random() * glyphs.length) | 0];
+
+  // --- camera / projection ---
+  let W, H, cx, cy;
+  const FOCAL = 420;        // lens: larger = narrower FOV / more zoom
+  const NEAR = 40;          // z at which a strand has flown past us
+  const FAR = 2600;         // spawn depth
+  const GLYPH_SPACING = 26; // world-space vertical gap between glyphs in a strand
+  const FIELD = 1400;       // how far strands spread from the centre axis
+
+  // steering: target (from mouse) vs eased current, so it glides instead of snapping
+  let steerTX = 0, steerTY = 0, steerX = 0, steerY = 0;
+
+  // speed: eased toward a target so acceleration ramps instead of jumping
+  let speedTarget = 6, speed = 6;   // forward walking speed (world units / frame)
+
+  function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    cx = W / 2; cy = H / 2;
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  // --- colour tints ---------------------------------------------------------
+  // A few strand "personalities": mostly classic green, some pale/bright, some
+  // deep & dim, a rare cyan-tinged one. w = how often it appears.
+  const TINTS = [
+    { body: [0, 255, 65],   head: [200, 255, 205], glow: '#9dffb0', w: 0.58 }, // classic
+    { body: [120, 255, 150], head: [225, 255, 230], glow: '#c8ffd4', w: 0.16 }, // pale bright
+    { body: [0, 170, 45],   head: [150, 225, 165], glow: '#3fbf6a', w: 0.16 }, // deep / dim
+    { body: [0, 255, 190],  head: [190, 255, 235], glow: '#7fffe0', w: 0.10 }, // cyan-green
+  ];
+  const STEPS = 32;
+  // Precompute every colour string once so the hot loop never allocates.
+  const PAL = TINTS.map(t => {
+    const body = [], head = [];
+    for (let i = 0; i <= STEPS; i++) {
+      const a = (i / STEPS).toFixed(3);
+      body[i] = `rgba(${t.body[0]},${t.body[1]},${t.body[2]},${a})`;
+      head[i] = `rgba(${t.head[0]},${t.head[1]},${t.head[2]},${a})`;
+    }
+    return { body, head, glow: t.glow };
+  });
+  function pickTint() {
+    let r = Math.random();
+    for (let i = 0; i < TINTS.length; i++) { r -= TINTS[i].w; if (r <= 0) return i; }
+    return 0;
+  }
+  const SHADOW_MIN = 14;   // only glow heads large enough for the blur to read
+
+  // --- strands ---
+  const NUM = 260;
+  const strands = [];
+
+  function spawn(s, atFar) {
+    s.x = rand(-FIELD, FIELD);
+    s.y = rand(-FIELD, FIELD);
+    s.z = atFar ? FAR : rand(NEAR, FAR);
+    // skewed so most strands are short-to-medium but some trail much longer
+    s.len = (6 + Math.pow(rand(0, 1), 1.8) * 64) | 0;   // ~6 to ~70
+    s.head = rand(0, s.len);      // bright leading glyph, descends the strand
+    s.fall = rand(0.1, 0.7);      // rain speed within the strand
+    s.tint = pickTint();          // colour personality
+    s.gs = GLYPH_SPACING * rand(0.7, 1.5);  // per-strand glyph size / thickness
+    s.trail = rand(0.45, 1.35);   // <1 short punchy trail, >1 long fading tail
+    s.mut = rand(0.004, 0.06);    // how twitchy the glyphs are
+    s.dim = rand(0.55, 1);        // overall brightness of the whole strand
+    s.chars = Array.from({ length: s.len }, pick);
+    return s;
+  }
+  for (let i = 0; i < NUM; i++) strands.push(spawn({}, false));
+
+  let last = 0;
+
+  function frame(ts) {
+    // frame-rate-independent time step (1 == a 60fps frame), clamped for tab-switches
+    const dt = last ? Math.min(3, (ts - last) / 16.667) : 1;
+    last = ts;
+    // fade previous frame -> motion trails
+    ctx.fillStyle = 'rgba(0,0,0,0.20)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center';
+
+    // ease steering + speed toward their targets (frame-rate independent)
+    const es = 1 - Math.pow(1 - 0.14, dt);
+    const el = 1 - Math.pow(1 - 0.07, dt);
+    steerX += (steerTX - steerX) * es;
+    steerY += (steerTY - steerY) * es;
+    speed += (speedTarget - speed) * el;
+    const px = cx + steerX, py = cy + steerY;
+
+    // draw far strands first so near ones overlap on top
+    strands.sort((a, b) => b.z - a.z);
+
+    let shadowOn = false, glowTint = -1;
+
+    for (const s of strands) {
+      // walk forward (scaled by dt so motion is speed-consistent at any refresh rate)
+      s.z -= speed * dt;
+      s.head += s.fall * dt;
+      if (s.head > s.len) s.head -= s.len;
+      if (s.z <= NEAR) { spawn(s, true); continue; }
+
+      const scale = FOCAL / s.z;
+      const sx = px + s.x * scale;
+      const sy0 = py + s.y * scale;
+      const size = s.gs * scale;                // per-strand thickness
+      if (size < 1.5) continue;                 // too far to matter
+      // cull strands that project entirely off-screen
+      if (sx < -size || sx > W + size) continue;
+
+      const pal = PAL[s.tint];
+      ctx.font = (size | 0) + 'px monospace';   // integer size -> glyph-atlas cache hit
+      const depthFog = Math.min(1, (FAR - s.z) / FAR + 0.15) * s.dim; // distance + strand dimness
+      const fogIdx = (depthFog * STEPS) | 0;
+      const trailLen = s.len * s.trail;         // per-strand trail length
+
+      for (let k = 0; k < s.len; k++) {
+        const sy = sy0 + k * size;
+        if (sy < -size || sy > H + size) continue;
+
+        // mutate glyphs at the strand's own twitchiness
+        if (Math.random() < s.mut) s.chars[k] = pick();
+
+        // brightness falls off behind the head
+        let d = s.head - k;
+        if (d < 0) d += s.len;
+
+        if (d < 0.6) {                          // bright leading glyph
+          ctx.fillStyle = pal.head[fogIdx];
+          const wantGlow = size >= SHADOW_MIN;  // skip the costly blur on tiny far heads
+          if (wantGlow && glowTint !== s.tint) { ctx.shadowColor = pal.glow; glowTint = s.tint; }
+          if (wantGlow !== shadowOn) { ctx.shadowBlur = wantGlow ? 8 : 0; shadowOn = wantGlow; }
+        } else {
+          if (shadowOn) { ctx.shadowBlur = 0; shadowOn = false; }
+          const bright = (1 - d / trailLen) * depthFog;
+          if (bright <= 0) continue;
+          ctx.fillStyle = pal.body[(bright * STEPS) | 0];
+        }
+        ctx.fillText(s.chars[k], sx, sy);
+      }
+    }
+    if (shadowOn) ctx.shadowBlur = 0;
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // --- controls (mouse steers, scroll / W-S set speed, space warps) ---
+  // The frame loop eases toward these targets, so the response stays smooth.
+  window.addEventListener('mousemove', (e) => {
+    steerTX = (e.clientX - cx) * 0.6;
+    steerTY = (e.clientY - cy) * 0.6;
+  });
+  window.addEventListener('wheel', (e) => {
+    speedTarget = Math.min(60, Math.max(-20, speedTarget - e.deltaY * 0.02));
+  }, { passive: true });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'w' || e.key === 'ArrowUp') speedTarget = Math.min(60, speedTarget + 2);
+    if (e.key === 's' || e.key === 'ArrowDown') speedTarget = Math.max(-20, speedTarget - 2);
+    if (e.code === 'Space') speedTarget = speedTarget > 30 ? 6 : 45;   // warp toggle
+  });
+</script>
+</body>
+</html>
