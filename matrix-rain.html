@@ -66,10 +66,14 @@
   const rng = mulberry32(SEED);
   const rand = (a, b) => a + rng() * (b - a);
 
-  const katakana = 'アァカサタナハマヤャラワガザダバパイィキシチニヒミリヰギジヂビピウゥクスツヌフムユュルグズブヅプエェケセテネヘメレヱゲゼデベペオォコソトノホモヨョロヲゴゾドボポヴッン';
+  // The film's set: half-width katakana (narrow, scanned from cookbooks) with
+  // Latin capitals and digits, all drawn mirrored -- see the frame transform.
+  const katakana = 'ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜｦﾝｧｨｩｪｫｬｭｮｯ';
   const glyphs = P.get('glyphs')
     ? [...new Set(P.get('glyphs'))]
-    : (katakana + 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:."=*+-<>').split('');
+    : (katakana + 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:・"=*+-<>¦').split('');
+  // a real Japanese monospace first, so the half-width forms keep their width
+  const FONT = 'px "Osaka-Mono", "MS Gothic", "Hiragino Kaku Gothic ProN", "Noto Sans Mono CJK JP", monospace';
   const pick = () => glyphs[(rng() * glyphs.length) | 0];
 
   // --- camera / projection ---
@@ -133,8 +137,8 @@
     return [((r + m) * 255) | 0, ((g + m) * 255) | 0, ((b + m) * 255) | 0];
   };
   const makeTints = (hue) => [
-    { body: hsl(hue, 100, 50),     head: hsl(hue, 100, 89),     w: 0.58 },  // classic
-    { body: hsl(hue + 12, 100, 73), head: hsl(hue + 12, 100, 94), w: 0.16 }, // pale bright
+    { body: hsl(hue, 95, 45),      head: hsl(hue, 100, 91),     w: 0.64 },  // classic: phosphor, not neon
+    { body: hsl(hue + 12, 100, 73), head: hsl(hue + 12, 100, 94), w: 0.10 }, // pale bright
     { body: hsl(hue - 8, 100, 33),  head: hsl(hue - 8, 70, 74),   w: 0.16 }, // deep / dim
     { body: hsl(hue + 45, 100, 50), head: hsl(hue + 45, 100, 87), w: 0.10 }, // shifted accent
   ];
@@ -208,26 +212,31 @@
     s.z = where === 1 ? FAR : where === -1 ? NEAR + 1 : rand(NEAR, FAR);
     // skewed so most strands are short-to-medium but some trail much longer
     s.len = (6 + Math.pow(rng(), 1.8) * 64) | 0;   // ~6 to ~70
-    s.head = rand(0, s.len);      // bright leading glyph, descends the strand
-    s.fall = rand(0.1, 0.7);      // rain speed within the strand
+    // A column goes dark between drops: the head runs past the end into a gap,
+    // the trail fades out, then the next drop starts from the top.
+    s.gap = rand(0, 0.8) * s.len;
+    s.head = rand(0, s.len + s.gap); // bright leading glyph, descends the strand
+    s.fall = rand(0.08, 0.3);     // rain speed within the strand (~5-18 glyphs/s)
     s.tint = pickTint();          // colour personality
     s.gs = GLYPH_SPACING * rand(0.7, 1.5);  // per-strand glyph size / thickness
     s.trail = rand(0.45, 1.35);   // <1 short punchy trail, >1 long fading tail
-    s.mut = rand(0.004, 0.06);    // how twitchy the glyphs are
+    s.mut = rand(0.002, 0.03);    // how twitchy the glyphs are
     s.dim = rand(0.55, 1);        // overall brightness of the whole strand
     s.wo = rng();                 // warp threshold -> the field bleaches unevenly
     s.msg = false;
-    if (!s.chars) s.chars = [];
+    if (!s.chars) { s.chars = []; s.jit = []; }
     // A few strands carry the message: long trail so the whole word stays lit.
     // It starts mostly encrypted and decodes under your gaze (see frame loop).
     if (MSG && rng() < 0.03) {
-      s.msg = true; s.len = MSG.length; s.mut = 0; s.trail = 3;
+      s.msg = true; s.len = MSG.length; s.mut = 0; s.trail = 3; s.gap = 0.2 * s.len;
       s.dim = 1; s.fall = 0.05; s.gs = GLYPH_SPACING * rand(1.0, 1.4);
       for (let i = 0; i < s.len; i++) s.chars[i] = rng() < 0.3 ? MSG[i] : pick();
     } else {
       for (let i = 0; i < s.len; i++) s.chars[i] = pick();
     }
-    s.chars.length = s.len;
+    // per-glyph brightness: the film's trails are ragged, not a smooth ramp
+    for (let i = 0; i < s.len; i++) s.jit[i] = rand(0.55, 1);
+    s.chars.length = s.jit.length = s.len;
     return s;
   }
   for (let i = 0; i < NUM; i++) strands.push(spawn({}, 0));
@@ -254,7 +263,9 @@
     // 0 -> 1 as we push past cruising speed; drives fog, lens and colour
     const warp = Math.max(0, Math.min(1, (speed - 18) / 30));
 
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    // Mirrored, like the film: everything is drawn flipped left-to-right.
+    // The cursor is mirrored in the mousemove handler so steering and gaze match.
+    ctx.setTransform(-dpr, 0, 0, dpr, W * dpr, 0);
     // fade previous frame -> motion trails. Faster travel = weaker fade = the
     // glyphs smear into streaks on their own.
     const fadeA = 1 - Math.pow(1 - (0.22 - 0.17 * Math.min(1, Math.abs(speed) / 50)), dt);
@@ -291,7 +302,8 @@
       s.z -= speed * dt;
       // rain runs faster when we do, so the cascade reads differently at warp
       s.head += s.fall * (1 + speed * 0.035) * dt;
-      if (s.head > s.len) s.head %= s.len;
+      const cyc = s.len + s.gap;                // drop + dark gap
+      if (s.head >= cyc) s.head %= cyc;
       if (s.z <= NEAR) { spawn(s, 1); tailN++; continue; }
       if (s.z > BEHIND) { spawn(s, -1); headN++; continue; }
 
@@ -313,7 +325,7 @@
       const depthFog = Math.min(1, (Math.min(1, (FAR - s.z) / FAR + 0.15) * s.dim + 0.45 * gaze) * edge);
       if (depthFog < 0.02) continue;            // still black: skip the draw calls
       const pal = (warp > s.wo ? PAL_W : PAL)[s.tint];
-      ctx.font = (size | 0) + 'px monospace';   // integer size -> glyph-atlas cache hit
+      ctx.font = (size | 0) + FONT;             // integer size -> glyph-atlas cache hit
       ctx.fillStyle = pal.body;                 // one colour per strand; brightness is alpha
       const trailLen = s.len * s.trail;         // per-strand trail length
       // twitchiness, not tied to refresh rate; glyphs under the cursor churn harder
@@ -325,17 +337,21 @@
         if (sy > H + size) break;               // strand runs downward: rest is below
         if (sy < -size) continue;
 
+        // a glyph that changes flashes for a moment, then settles to a new level
+        let j = s.jit[k];
         if (s.msg) {
           // the message decodes under your gaze and re-encrypts when it leaves
-          if (rng() < (0.03 + 0.35 * gaze) * dt) s.chars[k] = rng() < 0.3 + 0.7 * gaze ? MSG[k] : pick();
-        } else if (mut && rng() < mut) s.chars[k] = pick();
+          if (rng() < (0.03 + 0.35 * gaze) * dt) { s.chars[k] = rng() < 0.3 + 0.7 * gaze ? MSG[k] : pick(); j = 1.7; }
+        } else if (mut && rng() < mut) { s.chars[k] = pick(); j = 1.7; }
+        if (j > 1) { j -= 0.1 * dt; if (j <= 1) j = 0.55 + 0.45 * rng(); }
+        s.jit[k] = j;
 
-        // brightness falls off behind the head
+        // brightness falls off behind the head; dark ahead of it and in the gap
         let d = s.head - k;
-        if (d < 0) d += s.len;
+        if (d < 0) d += cyc;
 
         if (d < 0.6) { headK = k; headY = sy; continue; }   // bright leading glyph
-        const bright = (1 - d / trailLen) * depthFog;
+        const bright = Math.min(1, (1 - d / trailLen) * depthFog * j);
         if (bright <= 0) continue;
         ctx.globalAlpha = bright;
         ctx.fillText(s.chars[k], sx, sy); nGlyph++;
@@ -343,8 +359,8 @@
       if (headK >= 0) {
         if (size >= GLOW_MIN) {
           // glow blooms as a strand comes at you, and a little under the cursor
-          const gr = size * (0.9 + 1.3 * near + 0.4 * gaze);
-          ctx.globalAlpha = depthFog * (0.5 + 0.4 * near);
+          const gr = size * (0.7 + 1.3 * near + 0.4 * gaze);
+          ctx.globalAlpha = depthFog * (0.35 + 0.4 * near);   // soft core, not a bloom
           ctx.drawImage(pal.glow, sx - gr, headY - size * 0.35 - gr, gr * 2, gr * 2); nGlow++;
         }
         ctx.fillStyle = pal.head;
@@ -377,8 +393,8 @@
   // The frame loop eases toward these targets, so the response stays smooth.
   window.addEventListener('mousemove', (e) => {
     lastMouse = performance.now();
-    mx = e.clientX; my = e.clientY;
-    camTX = (e.clientX / W - 0.5) * 2 * 520;
+    mx = W - e.clientX; my = e.clientY;        // the frame is mirrored; so is the cursor
+    camTX = (0.5 - e.clientX / W) * 2 * 520;
     camTY = (e.clientY / H - 0.5) * 2 * 380;
   });
   document.addEventListener('mouseleave', () => { mx = my = -1e9; });   // gaze off when the cursor leaves
