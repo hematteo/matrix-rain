@@ -70,12 +70,58 @@
   // The film's set: half-width katakana (narrow, scanned from cookbooks) with
   // Latin capitals and digits, all drawn mirrored -- see the frame transform.
   const katakana = 'ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜｦﾝｧｨｩｪｫｬｭｮｯ';
-  const glyphs = P.get('glyphs')
+  let glyphs = P.get('glyphs')
     ? [...new Set(P.get('glyphs'))]
-    : (katakana + 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:・"=*+-<>¦').split('');
-  // a real Japanese monospace first, so the half-width forms keep their width
-  const FONT = 'px "Osaka-Mono", "MS Gothic", "Hiragino Kaku Gothic ProN", "Noto Sans Mono CJK JP", monospace';
+    : (katakana + 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:･."=*+-<>').split('');
+
+  // --- fonts ----------------------------------------------------------------
+  // Two stacks. A Japanese font supplies the half-width kana; a real monospace
+  // supplies the Latin and symbols. They are used at DIFFERENT sizes, chosen so
+  // both advance exactly one cell -- the film's glyphs sit on a uniform grid,
+  // and the Japanese faces that ship on most machines (Hiragino, Yu Gothic) are
+  // proportional for Latin: 'W' is 4x the width of ':' if you let them be.
+  const CJK = '"Hiragino Kaku Gothic ProN","Hiragino Sans","Osaka-Mono","MS Gothic","Meiryo","Yu Gothic","Noto Sans CJK JP","Noto Sans Mono CJK JP","IPAGothic","TakaoGothic","VL Gothic",sans-serif';
+  const MONO = 'ui-monospace,"SF Mono",Menlo,Consolas,"DejaVu Sans Mono","Liberation Mono",monospace';
+
+  const probe = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+  const REF = 100;
+  const advance = (stack, ch) => { probe.font = REF + 'px ' + stack; return probe.measureText(ch).width / REF; };
+  // Missing glyphs render as .notdef (a box) or as nothing. Comparing pixels
+  // against a codepoint no font can have catches both.
+  function covers(stack, ch) {
+    probe.canvas.width = probe.canvas.height = 24;
+    probe.font = '20px ' + stack; probe.textBaseline = 'top'; probe.fillStyle = '#fff';
+    const shot = (t) => { probe.clearRect(0, 0, 24, 24); probe.fillText(t, 0, 0);
+                          return probe.getImageData(0, 0, 24, 24).data.join(); };
+    const tofu = shot('\uFFFF'), blank = shot(' '), real = shot(ch);
+    return real !== tofu && real !== blank;
+  }
+
+  const HAS_KANA = covers(CJK, 'ｱ');
+  // One cell = the half-width advance (0.5 em in every Japanese face), or the
+  // monospace advance when no Japanese font is installed at all.
+  const CELL = HAS_KANA ? advance(CJK, 'ｱ') : advance(MONO, 'M');
+  const MONO_ADV = advance(MONO, 'M');
+  const MONO_SCALE = CELL / MONO_ADV;     // shrink Latin so its advance matches
+  // If the Japanese face is a true monospace (MS Gothic, Osaka-Mono) its ASCII
+  // is already one cell, so one font draws everything and MONO is never touched.
+  const CJK_MONO = HAS_KANA && Math.abs(advance(CJK, 'M') - CELL) < 0.01
+                            && Math.abs(advance(CJK, 'I') - CELL) < 0.01;
+  // Otherwise split by script, not by width: ASCII goes to the monospace face.
+  // Picking per-glyph on width alone would strand the odd Latin letter that
+  // happens to measure one cell (Hiragino's 'J') in a different typeface.
+  const USE_CJK = new Uint8Array(0x10000);
+  glyphs = glyphs.filter(ch => {
+    const cp = ch.charCodeAt(0);
+    const cjkOk = HAS_KANA && covers(CJK, ch) && Math.abs(advance(CJK, ch) - CELL) < 0.01;
+    if (cjkOk && (CJK_MONO || cp > 127)) { USE_CJK[cp] = 1; return true; }
+    return covers(MONO, ch);              // drop anything neither stack can draw
+  });
+  if (!glyphs.length) glyphs = ['0', '1'];
   const pick = () => glyphs[(rng() * glyphs.length) | 0];
+  // Latin glyphs are queued while the kana are drawn, then flushed in one go,
+  // so ctx.font changes twice per strand instead of once per glyph.
+  const qCh = [], qY = new Float32Array(1024), qA = new Float32Array(1024);
 
   // --- camera / projection ---
   let W, H, cx, cy, dpr;
@@ -182,7 +228,7 @@
     TINTS = makeTints(hueFor(name));
     PAL = buildPal(TINTS, false);
     PAL_W = buildPal(TINTS, true);
-    seedline.textContent = `${MODE} · seed "${SEED_STR}" · ${name} · ${strands.length} strands` + (MSG ? ` · "${MSG}"` : '');
+    seedline.textContent = `${MODE} · seed "${SEED_STR}" · ${name} · ${strands.length} strands · ${glyphs.length} glyphs${HAS_KANA ? '' : ' (no CJK font)'}` + (MSG ? ` · "${MSG}"` : '');
   }
   function pickTint() {
     let r = rng();
@@ -328,6 +374,9 @@
     focal += ((FOCAL - 170 * warp) - focal) * el;   // dolly-zoom: FOV opens at speed
 
     ctx.textAlign = 'center';
+    // centre each glyph on its row so `size` is a true cell pitch, and the two
+    // font sizes line up on the same axis
+    ctx.textBaseline = 'middle';
 
     const idle = ts - lastMouse > 2500;
     if (idle !== wasIdle) { document.body.classList.toggle('idle', idle); wasIdle = idle; }
@@ -368,12 +417,15 @@
       const depthFog = Math.min(1, (Math.min(1, (FAR - s.z) / FAR + 0.15) * s.dim + 0.45 * gaze) * edge);
       if (depthFog < 0.02) continue;            // still black: skip the draw calls
       const pal = (warp > s.wo ? PAL_W : PAL)[s.tint];
-      ctx.font = (size | 0) + FONT;             // integer size -> glyph-atlas cache hit
+      const fCjk = (size | 0) + 'px ' + CJK;   // integer size -> glyph-cache hit
+      const fMono = ((size * MONO_SCALE) | 0) + 'px ' + MONO;
+      ctx.font = fCjk;
       ctx.fillStyle = pal.body;                 // one colour per strand; brightness is alpha
       const trailLen = s.len * s.trail;         // per-strand trail length
       // twitchiness, not tied to refresh rate; glyphs under the cursor churn harder
       const mut = 1 - Math.pow(1 - s.mut * (1 + 6 * gaze), dt);
       let headK = -1, headY = 0;                // the bright glyph is drawn last, on top
+      let qn = 0;                               // queued Latin glyphs
 
       for (let k = 0; k < s.len; k++) {
         const sy = sy0 + k * size;
@@ -396,19 +448,31 @@
         if (d < 0.6) { headK = k; headY = sy; continue; }   // bright leading glyph
         const bright = Math.min(1, (1 - d / trailLen) * depthFog * j);
         if (bright <= 0) continue;
-        ctx.globalAlpha = bright;
-        ctx.fillText(s.chars[k], sx, sy); nGlyph++;
+        const ch = s.chars[k];
+        if (USE_CJK[ch.charCodeAt(0)]) {
+          ctx.globalAlpha = bright;
+          ctx.fillText(ch, sx, sy); nGlyph++;
+        } else if (qn < 1024) {
+          qCh[qn] = ch; qY[qn] = sy; qA[qn] = bright; qn++;
+        }
+      }
+      if (qn) {
+        ctx.font = fMono;
+        for (let q = 0; q < qn; q++) { ctx.globalAlpha = qA[q]; ctx.fillText(qCh[q], sx, qY[q]); nGlyph++; }
+        ctx.font = fCjk;
       }
       if (headK >= 0) {
         if (size >= GLOW_MIN) {
           // glow blooms as a strand comes at you, and a little under the cursor
           const gr = size * (0.7 + 1.3 * near + 0.4 * gaze);
           ctx.globalAlpha = depthFog * (0.35 + 0.4 * near);   // soft core, not a bloom
-          ctx.drawImage(pal.glow, sx - gr, headY - size * 0.35 - gr, gr * 2, gr * 2); nGlow++;
+          ctx.drawImage(pal.glow, sx - gr, headY - gr, gr * 2, gr * 2); nGlow++;
         }
+        const hc = s.chars[headK];
+        if (!USE_CJK[hc.charCodeAt(0)]) ctx.font = fMono;
         ctx.fillStyle = pal.head;
         ctx.globalAlpha = depthFog;
-        ctx.fillText(s.chars[headK], sx, headY); nGlyph++;
+        ctx.fillText(hc, sx, headY); nGlyph++;
       }
     }
     ctx.globalAlpha = 1;
