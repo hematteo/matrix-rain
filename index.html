@@ -275,7 +275,7 @@
     if (name === 'seed' || !(name in NAMED)) return SEED % 360;
     return NAMED[name];
   }
-  let paletteName = P.get('palette') || 'seed';
+  let paletteName = P.get('palette') || 'green';
 
   const WARP_RGB = [190, 255, 255];   // everything bleaches toward this at speed
   // One solid colour per tint; brightness is globalAlpha (a number, no string

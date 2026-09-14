@@ -34,8 +34,8 @@ index.html#seed=matteo&palette=amber&density=320&msg=WAKE+UP&mode=classic
 
 | option | meaning |
 |---|---|
-| `seed=<string>` | grows the whole field — palette hue, density, every strand |
-| `palette=` | `seed`, `auto` (tracks the clock), or `green` `amber` `ice` `magenta` `blood` `gold` |
+| `seed=<string>` | grows the whole field — density, every strand, and the hue under `palette=seed` |
+| `palette=` | `green` (default) `amber` `ice` `magenta` `blood` `gold`, or `seed`, or `auto` (tracks the clock) |
 | `density=<n>` | strand count, 40–900 (otherwise derived from the seed) |
 | `msg=<text>` | hidden message strands; they decode under the cursor |
 | `glyphs=<chars>` | use your own character set |
