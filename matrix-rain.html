@@ -26,11 +26,16 @@
       repeating-linear-gradient(0deg, rgba(0,0,0,0.10) 0 1px, transparent 1px 3px);
   }
   #fx.off { display: none; }
+  #dbg {
+    position: fixed; right: 14px; top: 12px; text-align: right;
+    font: 12px/1.5 monospace; color: #ffffff99; pointer-events: none; user-select: none;
+  }
 </style>
 </head>
 <body>
 <canvas id="matrix"></canvas>
 <div id="fx"></div>
+<div id="dbg" hidden></div>
 <div id="hud">
   move <b>mouse</b> to steer &nbsp;·&nbsp; <b>scroll</b> / <b>W</b>/<b>S</b> speed &nbsp;·&nbsp; <b>space</b> warp &nbsp;·&nbsp; <b>C</b> palette &nbsp;·&nbsp; <b>F</b> fullscreen &nbsp;·&nbsp; <b>V</b> effects &nbsp;·&nbsp; <b>P</b> save &nbsp;·&nbsp; <b>H</b> hide
   <span class="seed" id="seedline"></span>
@@ -92,8 +97,23 @@
   let lastMouse = performance.now(); // idle timer: hides the cursor + HUD, gates autopilot
   let wasIdle = false;
 
+  // --- adaptive quality -----------------------------------------------------
+  // A frame-time EMA steps the render scale (backing-store pixels) and the
+  // far-cull size down when frames are being dropped, and back up cautiously
+  // when there is clear headroom, so the page finds its own level on whatever
+  // it is running on. Each down-step doubles the wait before trying up again.
+  const TOUCH = 'ontouchstart' in window;
+  const MAX_DPR = Math.min(window.devicePixelRatio || 1, TOUCH ? 1.5 : 2);
+  const QUALITY = [1, 0.75, 0.5];   // render-scale steps
+  let qi = 0;
+  let ftEma = 16.7, workEma = 4;    // ms: rAF interval, and our own CPU time per frame
+  let lastStep = 0, upWait = 4000, lastDbg = 0;
+  const DEBUG = P.get('debug') === '1';
+  dbg.hidden = !DEBUG;
+  if (TOUCH) fx.classList.add('off');  // the overlay is pure fill-rate on a phone
+
   function resize() {
-    dpr = Math.min(2, window.devicePixelRatio || 1);
+    dpr = MAX_DPR * QUALITY[qi];
     W = window.innerWidth; H = window.innerHeight;
     canvas.width = W * dpr; canvas.height = H * dpr;   // render at native pixels
     canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
@@ -129,19 +149,26 @@
   }
   let paletteName = P.get('palette') || 'seed';
 
-  const STEPS = 32;
   const WARP_RGB = [190, 255, 255];   // everything bleaches toward this at speed
-  // Precompute every colour string once so the hot loop never allocates.
+  // One solid colour per tint; brightness is globalAlpha (a number, no string
+  // parse per glyph). The glow is a cached radial blob drawn behind the head:
+  // one drawImage of a bitmap, where a canvas shadow would re-render and blur
+  // the glyph into a temp surface on every single head, every frame.
+  function glowSprite(rgb) {
+    const c = document.createElement('canvas'); c.width = c.height = 64;
+    const g = c.getContext('2d');
+    const grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+    grad.addColorStop(0, `rgba(${rgb},0.9)`);
+    grad.addColorStop(0.35, `rgba(${rgb},0.35)`);
+    grad.addColorStop(1, `rgba(${rgb},0)`);
+    g.fillStyle = grad; g.fillRect(0, 0, 64, 64);
+    return c;
+  }
   function buildPal(tints, warpMix) {
     const mix = (c) => warpMix ? c.map((v, i) => (v + (WARP_RGB[i] - v) * 0.72) | 0) : c;
     return tints.map(t => {
-      const b = mix(t.body), h = mix(t.head), body = [], head = [];
-      for (let i = 0; i <= STEPS; i++) {
-        const a = (i / STEPS).toFixed(3);
-        body[i] = `rgba(${b[0]},${b[1]},${b[2]},${a})`;
-        head[i] = `rgba(${h[0]},${h[1]},${h[2]},${a})`;
-      }
-      return { body, head, glow: `rgb(${h[0]},${h[1]},${h[2]})` };
+      const b = mix(t.body), h = mix(t.head);
+      return { body: `rgb(${b})`, head: `rgb(${h})`, glow: glowSprite(h) };
     });
   }
   let TINTS, PAL, PAL_W;
@@ -157,7 +184,7 @@
     for (let i = 0; i < TINTS.length; i++) { r -= TINTS[i].w; if (r <= 0) return i; }
     return 0;
   }
-  const SHADOW_MIN = 14;   // only glow heads large enough for the blur to read
+  const GLOW_MIN = 14;     // only glow heads large enough for it to read
 
   // --- strands ---
   // density also falls out of the seed unless it is pinned in the hash
@@ -213,7 +240,16 @@
   function frame(ts) {
     // frame-rate-independent time step (1 == a 60fps frame), clamped for tab-switches
     const dt = last ? Math.min(3, (ts - last) / 16.667) : 1;
+    const t0 = performance.now();
+    if (last && ts - last < 100) ftEma += (ts - last - ftEma) * 0.1;   // ignore tab-switch gaps
     last = ts;
+
+    if (ts - lastStep > 1000 && ftEma > 24 && qi < QUALITY.length - 1) {
+      qi++; lastStep = ts; upWait = Math.min(60000, upWait * 2); resize();
+    } else if (ts - lastStep > upWait && ftEma < 18 && workEma < 6 && qi > 0) {
+      qi--; lastStep = ts; resize();
+    }
+    const minSize = 1.5 / QUALITY[qi];          // far-cull grows as quality drops
 
     // 0 -> 1 as we push past cruising speed; drives fog, lens and colour
     const warp = Math.max(0, Math.min(1, (speed - 18) / 30));
@@ -246,8 +282,8 @@
     const idle = ts - lastMouse > 2500;
     if (idle !== wasIdle) { document.body.classList.toggle('idle', idle); wasIdle = idle; }
 
-    let shadowBlur = 0, glowTint = -1, glowWarp = false;
     let headN = 0, tailN = 0;   // recycled strands, always contiguous at the ends
+    let nGlyph = 0, nGlow = 0;
 
     for (let i = 0; i < strands.length; i++) {
       const s = strands[i];
@@ -263,7 +299,7 @@
       const sx = cx + (s.x - camX) * scale;      // parallax: depth-dependent sweep
       const sy0 = cy + (s.y - camY) * scale;
       const size = s.gs * scale;                // per-strand thickness
-      if (size < 1.5) continue;                 // too far to matter
+      if (size < minSize) continue;             // too far to matter
       // cull strands that project entirely off-screen
       if (sx < -size || sx > W + size) continue;
 
@@ -277,14 +313,12 @@
       const depthFog = Math.min(1, (Math.min(1, (FAR - s.z) / FAR + 0.15) * s.dim + 0.45 * gaze) * edge);
       if (depthFog < 0.02) continue;            // still black: skip the draw calls
       const pal = (warp > s.wo ? PAL_W : PAL)[s.tint];
-      const isWarp = warp > s.wo;
       ctx.font = (size | 0) + 'px monospace';   // integer size -> glyph-atlas cache hit
-      const fogIdx = (depthFog * STEPS) | 0;
+      ctx.fillStyle = pal.body;                 // one colour per strand; brightness is alpha
       const trailLen = s.len * s.trail;         // per-strand trail length
       // twitchiness, not tied to refresh rate; glyphs under the cursor churn harder
       const mut = 1 - Math.pow(1 - s.mut * (1 + 6 * gaze), dt);
-      // glow blooms as a strand comes at you, and a little under the cursor
-      const wantBlur = size >= SHADOW_MIN ? ((8 + 26 * near + 8 * gaze) * dpr) | 0 : 0;
+      let headK = -1, headY = 0;                // the bright glyph is drawn last, on top
 
       for (let k = 0; k < s.len; k++) {
         const sy = sy0 + k * size;
@@ -300,22 +334,25 @@
         let d = s.head - k;
         if (d < 0) d += s.len;
 
-        if (d < 0.6) {                          // bright leading glyph
-          ctx.fillStyle = pal.head[fogIdx];
-          if (wantBlur && (glowTint !== s.tint || glowWarp !== isWarp)) {
-            ctx.shadowColor = pal.glow; glowTint = s.tint; glowWarp = isWarp;
-          }
-          if (wantBlur !== shadowBlur) { ctx.shadowBlur = wantBlur; shadowBlur = wantBlur; }
-        } else {
-          if (shadowBlur) { ctx.shadowBlur = 0; shadowBlur = 0; }
-          const bright = (1 - d / trailLen) * depthFog;
-          if (bright <= 0) continue;
-          ctx.fillStyle = pal.body[(bright * STEPS) | 0];
+        if (d < 0.6) { headK = k; headY = sy; continue; }   // bright leading glyph
+        const bright = (1 - d / trailLen) * depthFog;
+        if (bright <= 0) continue;
+        ctx.globalAlpha = bright;
+        ctx.fillText(s.chars[k], sx, sy); nGlyph++;
+      }
+      if (headK >= 0) {
+        if (size >= GLOW_MIN) {
+          // glow blooms as a strand comes at you, and a little under the cursor
+          const gr = size * (0.9 + 1.3 * near + 0.4 * gaze);
+          ctx.globalAlpha = depthFog * (0.5 + 0.4 * near);
+          ctx.drawImage(pal.glow, sx - gr, headY - size * 0.35 - gr, gr * 2, gr * 2); nGlow++;
         }
-        ctx.fillText(s.chars[k], sx, sy);
+        ctx.fillStyle = pal.head;
+        ctx.globalAlpha = depthFog;
+        ctx.fillText(s.chars[headK], sx, headY); nGlyph++;
       }
     }
-    if (shadowBlur) ctx.shadowBlur = 0;
+    ctx.globalAlpha = 1;
 
     // Restore the far -> near invariant without a full sort: strands that flew
     // past us are the tail (smallest z) and belong at the front, and vice versa.
@@ -324,6 +361,13 @@
       const tail = tailN ? strands.splice(strands.length - tailN, tailN) : [];
       if (tail.length) strands.unshift(...tail);
       if (head.length) strands.push(...head);
+    }
+
+    workEma += (performance.now() - t0 - workEma) * 0.1;
+    if (DEBUG && ts - lastDbg > 250) {
+      lastDbg = ts;
+      dbg.textContent = `${ftEma.toFixed(1)} ms/frame · ${workEma.toFixed(1)} ms cpu · `
+        + `${nGlyph} glyphs · ${nGlow} glows · ${(W * dpr) | 0}×${(H * dpr) | 0} @${dpr.toFixed(2)} · q${QUALITY[qi]}`;
     }
     requestAnimationFrame(frame);
   }
