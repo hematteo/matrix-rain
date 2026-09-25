@@ -78,11 +78,20 @@
 </div>
 <script>
   const canvas = document.getElementById('matrix');
-  const ctx = canvas.getContext('2d');
 
   // --- config: everything lives in the URL hash, so a look is shareable -------
   // #seed=matteo&palette=amber&density=320&msg=WAKE+UP&glyphs=01&idle=1
   const P = new URLSearchParams(location.hash.slice(1));
+  // Wide gamut: on a P3 display the palette's numbers are read as P3, which
+  // reaches a phosphor green sRGB cannot show. Every canvas the rain passes
+  // through has to be P3 too, or it is clipped back to sRGB on the way.
+  // #p3=0 opts out, #p3=1 forces it.
+  const WANT_P3 = P.get('p3') === '1' || (P.get('p3') !== '0'
+    && typeof matchMedia === 'function' && matchMedia('(color-gamut: p3)').matches);
+  const ctx2d = (c) => c.getContext('2d', WANT_P3 ? { colorSpace: 'display-p3' } : undefined);
+  const ctx = ctx2d(canvas);
+  // browsers without canvas colour spaces ignore the option; then stay in sRGB
+  const P3 = WANT_P3 && ctx.getContextAttributes?.().colorSpace === 'display-p3';
   const SEED_STR = P.get('seed') || 'matrix';
   const MSG = (P.get('msg') || '').toUpperCase();
   let MODE = P.get('mode') === 'classic' ? 'classic' : 'fly';   // 'fly' = 3D corridor, 'classic' = the film
@@ -189,6 +198,15 @@
   // Latin glyphs are queued while the kana are drawn, then flushed in one go,
   // so ctx.font changes twice per strand instead of once per glyph.
   const qCh = [], qY = new Float32Array(1024), qA = new Float32Array(1024);
+  const nCh = [], nY = new Float32Array(8), nA = new Float32Array(8);   // neck glyphs
+  // One glyph in whichever face it belongs to; leaves ctx.font on the kana.
+  function glyph(ch, x, y, fCjk, fMono) {
+    if (USE_CJK[ch.charCodeAt(0)]) { ctx.fillText(ch, x, y); return; }
+    if (SQUEEZE) {
+      ctx.save(); ctx.translate(x, 0); ctx.scale(MONO_SQUEEZE, 1);
+      ctx.font = fMono; ctx.fillText(ch, 0, y); ctx.restore();
+    } else { ctx.font = fMono; ctx.fillText(ch, x, y); ctx.font = fCjk; }
+  }
 
   // --- camera / projection ---
   let W, H, cx, cy, dpr;
@@ -235,7 +253,13 @@
   // The film's glyphs sit in heavy, soft bloom; a per-head sprite is far
   // tighter than that. Quarter-resolution blur of the whole frame, screened
   // back over it. Off on touch devices and whenever the governor steps down.
-  const bloomCtx = bloom.getContext('2d');
+  const bloomCtx = ctx2d(bloom);
+  // The source is thresholded first, so only heads and the brightest glyphs
+  // bloom and the dim trails no longer lift the blacks into a green haze.
+  // Then two blurs of it: a tight core and a wide, faint halo. #halo=0 is the
+  // old single blur of the whole frame.
+  const HALO = P.get('halo') !== '0';
+  const bloomSrc = document.createElement('canvas'), bloomSrcCtx = ctx2d(bloomSrc);
   const BLOOM_DIV = 4;
   const BLOOM = Math.max(0, Math.min(1, P.get('bloom') === null ? (TOUCH ? 0 : 0.5) : +P.get('bloom') || 0));
   let bloomOff = BLOOM <= 0;
@@ -251,6 +275,7 @@
     // CSS stretches the small bloom buffer back up, which smooths it for free
     bloom.width = Math.max(1, (W * dpr / BLOOM_DIV) | 0);
     bloom.height = Math.max(1, (H * dpr / BLOOM_DIV) | 0);
+    bloomSrc.width = bloom.width; bloomSrc.height = bloom.height;
     cx = W / 2; cy = H / 2;
   }
   resize();
@@ -266,12 +291,27 @@
     const r = [c, x, 0, 0, x, c][i], g = [x, c, c, x, 0, 0][i], b = [0, 0, x, c, c, x][i];
     return [((r + m) * 255) | 0, ((g + m) * 255) | 0, ((b + m) * 255) | 0];
   };
+  // `neck` is the few glyphs just behind the head: the film's drop cools from
+  // white through a pale, washed-out tint into the saturated body.
   const makeTints = (hue) => [
-    { body: hsl(hue, 95, 45),      head: hsl(hue, 100, 91),     w: 0.64 },  // classic: phosphor, not neon
-    { body: hsl(hue + 12, 100, 73), head: hsl(hue + 12, 100, 94), w: 0.10 }, // pale bright
-    { body: hsl(hue - 8, 100, 33),  head: hsl(hue - 8, 70, 74),   w: 0.16 }, // deep / dim
-    { body: hsl(hue + 45, 100, 50), head: hsl(hue + 45, 100, 87), w: 0.10 }, // shifted accent
+    { body: hsl(hue, 95, 45),      neck: hsl(hue, 80, 72),       head: hsl(hue, 100, 91),     w: 0.64 },  // classic: phosphor, not neon
+    { body: hsl(hue + 12, 100, 73), neck: hsl(hue + 12, 100, 85), head: hsl(hue + 12, 100, 94), w: 0.10 }, // pale bright
+    { body: hsl(hue - 8, 100, 33),  neck: hsl(hue - 8, 85, 55),   head: hsl(hue - 8, 70, 74),   w: 0.16 }, // deep / dim
+    { body: hsl(hue + 45, 100, 50), neck: hsl(hue + 45, 100, 72), head: hsl(hue + 45, 100, 87), w: 0.10 }, // shifted accent
   ];
+  // Colour ramp along the trail (#ramp=0 for the old flat one): the neck
+  // tint, and a power-curve falloff stretched longer, so the head stays punchy
+  // and the tail thins out gradually instead of greying out linearly. Both
+  // pairs keep mean brightness about where the linear ramp had it. Fly gets
+  // the gentler curve: its camera motion already smears the tail, and a
+  // longer one there only adds haze.
+  const RAMP = P.get('ramp') !== '0';
+  const NECK = RAMP ? 3 : 0;            // glyphs behind the head drawn in the neck tint
+  const TRAIL_POW = { classic: RAMP ? 2 : 1, fly: RAMP ? 1.4 : 1 };
+  const TRAIL_STRETCH = { classic: RAMP ? 1.4 : 1, fly: RAMP ? 1.15 : 1 };
+  const css = (c, a) => P3
+    ? `color(display-p3 ${c.map(v => (v / 255).toFixed(4)).join(' ')}${a === undefined ? '' : ' / ' + a})`
+    : a === undefined ? `rgb(${c})` : `rgba(${c},${a})`;
   const NAMED = { green: 135, amber: 42, ice: 190, magenta: 310, blood: 0, gold: 52 };
   const NAMES = Object.keys(NAMED);
   // palette=seed  -> a hue nobody else's seed lands on
@@ -290,19 +330,19 @@
   // the glyph into a temp surface on every single head, every frame.
   function glowSprite(rgb) {
     const c = document.createElement('canvas'); c.width = c.height = 64;
-    const g = c.getContext('2d');
+    const g = ctx2d(c);
     const grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
-    grad.addColorStop(0, `rgba(${rgb},0.9)`);
-    grad.addColorStop(0.35, `rgba(${rgb},0.35)`);
-    grad.addColorStop(1, `rgba(${rgb},0)`);
+    grad.addColorStop(0, css(rgb, 0.9));
+    grad.addColorStop(0.35, css(rgb, 0.35));
+    grad.addColorStop(1, css(rgb, 0));
     g.fillStyle = grad; g.fillRect(0, 0, 64, 64);
     return c;
   }
   function buildPal(tints, warpMix) {
     const mix = (c) => warpMix ? c.map((v, i) => (v + (WARP_RGB[i] - v) * 0.72) | 0) : c;
     return tints.map(t => {
-      const b = mix(t.body), h = mix(t.head);
-      return { body: `rgb(${b})`, head: `rgb(${h})`, glow: glowSprite(h) };
+      const b = mix(t.body), n = mix(t.neck), h = mix(t.head);
+      return { body: css(b), neck: css(n), head: css(h), glow: glowSprite(h) };
     });
   }
   let TINTS, PAL, PAL_W;
@@ -430,6 +470,7 @@
     // 0 -> 1 as we push past cruising speed; drives fog, lens and colour
     const spd = MODE === 'classic' ? 0 : speed;   // the film's rain does not travel
     const warp = Math.max(0, Math.min(1, (spd - 18) / 30));
+    const tPow = TRAIL_POW[MODE], tStretch = TRAIL_STRETCH[MODE];
 
     // Mirrored, like the film: everything is drawn flipped left-to-right.
     // The cursor is mirrored in the mousemove handler so steering and gaze match.
@@ -504,11 +545,11 @@
       const fMono = ((size * MONO_SIZE) | 0) + 'px ' + MONO;
       ctx.font = fCjk;
       ctx.fillStyle = pal.body;                 // one colour per strand; brightness is alpha
-      const trailLen = s.len * s.trail;         // per-strand trail length
+      const trailLen = s.len * s.trail * tStretch;   // per-strand trail length
       // twitchiness, not tied to refresh rate; glyphs under the cursor churn harder
       const mut = 1 - Math.pow(1 - s.mut * (1 + 6 * gaze), dt);
       let headK = -1, headY = 0;                // the bright glyph is drawn last, on top
-      let qn = 0;                               // queued Latin glyphs
+      let qn = 0, nn = 0;                       // queued Latin glyphs, neck glyphs
       // The frame is mirrored like the film, which leaves the message reading
       // backwards. Flip these strands back about their own axis so the noise
       // stays film-accurate but the message you chose is legible.
@@ -535,10 +576,13 @@
         if (d < 0) d += cyc;
 
         if (d < 0.6) { headK = k; headY = sy; continue; }   // bright leading glyph
-        const bright = Math.min(1, (1 - d / trailLen) * depthFog * j);
-        if (bright <= 0) continue;
+        const f = 1 - d / trailLen;
+        if (f <= 0) continue;
+        const bright = Math.min(1, Math.pow(f, tPow) * depthFog * j);
         const ch = s.chars[k];
-        if (USE_CJK[ch.charCodeAt(0)]) {
+        if (d < NECK) {
+          if (nn < 8) { nCh[nn] = ch; nY[nn] = sy; nA[nn] = bright; nn++; }
+        } else if (USE_CJK[ch.charCodeAt(0)]) {
           ctx.globalAlpha = bright;
           ctx.fillText(ch, gx, sy); nGlyph++;
         } else if (qn < 1024) {
@@ -552,6 +596,10 @@
         for (let q = 0; q < qn; q++) { ctx.globalAlpha = qA[q]; ctx.fillText(qCh[q], qx, qY[q]); nGlyph++; }
         if (SQUEEZE) ctx.restore(); else ctx.font = fCjk;   // restore() puts fCjk back
       }
+      if (nn) {
+        ctx.fillStyle = pal.neck;
+        for (let q = 0; q < nn; q++) { ctx.globalAlpha = nA[q]; glyph(nCh[q], gx, nY[q], fCjk, fMono); nGlyph++; }
+      }
       if (headK >= 0) {
         if (size >= GLOW_MIN) {
           // glow blooms as a strand comes at you, and a little under the cursor
@@ -559,17 +607,9 @@
           ctx.globalAlpha = depthFog * (0.35 + 0.4 * near);   // soft core, not a bloom
           ctx.drawImage(pal.glow, gx - gr, headY - gr, gr * 2, gr * 2); nGlow++;
         }
-        const hc = s.chars[headK];
         ctx.fillStyle = pal.head;
         ctx.globalAlpha = depthFog;
-        if (USE_CJK[hc.charCodeAt(0)]) {
-          ctx.fillText(hc, gx, headY); nGlyph++;
-        } else if (SQUEEZE) {
-          ctx.save(); ctx.translate(gx, 0); ctx.scale(MONO_SQUEEZE, 1);
-          ctx.font = fMono; ctx.fillText(hc, 0, headY); nGlyph++; ctx.restore();
-        } else {
-          ctx.font = fMono; ctx.fillText(hc, gx, headY); nGlyph++;
-        }
+        glyph(s.chars[headK], gx, headY, fCjk, fMono); nGlyph++;
       }
       if (s.msg) ctx.restore();
     }
@@ -587,10 +627,29 @@
     const bloomOn = !bloomOff && qi === 0;
     bloom.classList.toggle('off', !bloomOn);
     if (bloomOn) {
-      bloomCtx.clearRect(0, 0, bloom.width, bloom.height);
-      bloomCtx.filter = 'blur(2px)';        // 2px at quarter res ~ 8px on screen
-      bloomCtx.globalAlpha = BLOOM;
-      bloomCtx.drawImage(canvas, 0, 0, bloom.width, bloom.height);
+      const bw = bloom.width, bh = bloom.height;
+      bloomCtx.clearRect(0, 0, bw, bh);
+      if (HALO) {
+        // contrast() about mid-grey is a soft threshold: channels under ~0.3
+        // go to black, over ~0.7 saturate. Downscaled first, so tiny far
+        // heads average out and only glyphs of some size bloom.
+        bloomSrcCtx.clearRect(0, 0, bw, bh);
+        bloomSrcCtx.filter = 'brightness(1.3) contrast(2.5)';
+        bloomSrcCtx.drawImage(canvas, 0, 0, bw, bh);
+        bloomSrcCtx.filter = 'none';
+        bloomCtx.filter = 'blur(2px)';      // core: 2px at quarter res ~ 8px on screen
+        bloomCtx.globalAlpha = BLOOM;
+        bloomCtx.drawImage(bloomSrc, 0, 0);
+        bloomCtx.globalCompositeOperation = 'lighter';
+        bloomCtx.filter = 'blur(8px)';      // halo
+        bloomCtx.globalAlpha = BLOOM * 0.7;
+        bloomCtx.drawImage(bloomSrc, 0, 0);
+        bloomCtx.globalCompositeOperation = 'source-over';
+      } else {
+        bloomCtx.filter = 'blur(2px)';
+        bloomCtx.globalAlpha = BLOOM;
+        bloomCtx.drawImage(canvas, 0, 0, bw, bh);
+      }
       bloomCtx.filter = 'none';
     }
 
@@ -600,7 +659,7 @@
       dbg.textContent = `${ftEma.toFixed(1)} ms/frame · ${workEma.toFixed(1)} ms cpu · `
         + `${nGlyph} glyphs · ${nGlow} glows · ${(W * dpr) | 0}×${(H * dpr) | 0} @${dpr.toFixed(2)} · q${QUALITY[qi]}`
         + ` · latin ${MONO_SIZE.toFixed(2)}x${SQUEEZE ? ' squeezed ' + MONO_SQUEEZE.toFixed(2) : ''}`
-        + ` · bloom ${bloomOn ? BLOOM.toFixed(2) : 'off'}`;
+        + ` · bloom ${bloomOn ? BLOOM.toFixed(2) + (HALO ? ' halo' : '') : 'off'} · ${P3 ? 'p3' : 'srgb'}`;
     }
     requestAnimationFrame(frame);
   }

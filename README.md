@@ -41,6 +41,9 @@ index.html#seed=matteo&palette=amber&density=320&msg=WAKE+UP&mode=classic
 | `glyphs=<chars>` | use your own character set |
 | `mode=classic` | start flat instead of flying |
 | `bloom=0..1` | bloom strength, `0` to disable |
+| `halo=0` | old bloom: one blur of the whole frame, instead of a thresholded core plus a wide halo |
+| `ramp=0` | flat trails: no pale neck behind the head, linear falloff |
+| `p3=0` / `p3=1` | never / always draw in Display-P3 (default: when the display supports it) |
 | `idle=1` | drift the camera when left unattended |
 | `motion=1` | fly even when the OS asks for reduced motion |
 | `debug=1` | frame time, glyph and glow counts, render scale, font scaling |
