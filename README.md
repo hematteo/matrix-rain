@@ -15,18 +15,23 @@ Every field is grown from a seed, so the same seed always produces the same rain
 |---|---|---|
 | steer | move the mouse | drag |
 | speed | scroll, or `W` / `S` | two fingers up/down |
-| warp | `space` | double-tap |
-| palette | `C` | **colour** button |
-| fly / classic | `M` | **mode** button |
+| warp | `space` | double-tap, or **warp** |
+| palette | `C` (`shift+C` back) | colour swatch button |
+| fly / classic | `M` | mode button |
+| new seed | `R` | — |
+| copy a link to this look | `L` | — |
 | fullscreen | `F` | — |
 | vignette + scanlines | `V` | — |
 | bloom | `B` | — |
 | save a PNG | `P` | — |
-| hide the HUD | `H` | **hide** button |
+| show the controls | `?` | **?** button |
+| hide everything | `H` | **hide**, then long-press to bring it back |
+
+The controls legend shows for a few seconds on load, then folds down to a one-line hint. It lists only the controls that work in the current mode and browser. Every change is confirmed by a short message at the top of the screen.
 
 ## URL options
 
-Everything lives in the hash, so a look is a shareable link:
+Everything lives in the hash, so a look is a shareable link. Changing the seed, palette or mode updates the hash as you go, so the address bar always links to what is on screen. Editing the hash by hand reloads with the new values.
 
 ```
 index.html#seed=matteo&palette=amber&density=320&msg=WAKE+UP&mode=classic
@@ -67,8 +72,9 @@ python3 tools/build-artifact.py
 
 The Artifact runtime supplies its own document wrapper, so the build strips
 `<!doctype>`, `<html>`, `<head>` and `<body>` and the document-level metadata
-the host owns. Two controls are unavailable in an embedded frame and degrade
-quietly there: `P` (save a PNG) is hidden, and `F` (fullscreen) is a no-op.
+the host owns. In an embedded frame, `P` (save a PNG), `L` (copy link) and
+`F` (fullscreen) are left out of the legend. Pressing them there shows a
+message saying they are unavailable.
 
 ## Licence
 

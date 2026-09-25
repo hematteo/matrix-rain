@@ -14,34 +14,71 @@
 <meta property="og:image" content="https://hematteo.github.io/matrix-rain/preview.png">
 <meta name="twitter:card" content="summary_large_image">
 <style>
-  html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; }
+  :root { --hue: 135; }                   /* set from the palette in setPalette() */
+  html, body {
+    margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden;
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+  }
   canvas { display: block; cursor: crosshair; touch-action: none; }
   body.idle canvas { cursor: none; }      /* the reticle leaves when your hand stops */
+  /* the chrome takes the palette's hue, washed out, so nothing on screen is off-palette */
   #hud {
-    position: fixed; left: 16px; bottom: 12px;
-    font: 12px/1.5 monospace; color: #ffffff88;
-    text-shadow: 0 0 6px #00000099; pointer-events: none; user-select: none;
+    position: fixed; left: 16px; bottom: 12px; max-width: calc(100% - 32px);
+    font: 12px/1.6 monospace; color: hsl(var(--hue) 30% 82% / 0.6);
+    text-shadow: 0 0 6px #000; pointer-events: none;
     transition: opacity 0.7s;
   }
-  body.idle #hud { opacity: 0; }
-  #hud b { color: #ffffffd0; }
+  /* idle fades the caption, never a legend someone opened to read */
+  body.idle #hud:not(.open) { opacity: 0; }
+  #hud b { color: hsl(var(--hue) 45% 92% / 0.9); }
   #hud .seed { display: block; opacity: 0.6; }
   #hud.off { display: none; }
+  #legend {
+    display: none; grid-template-columns: auto auto; gap: 0 16px;
+    margin-bottom: 10px; animation: fade-in 0.3s;
+  }
+  #hud.open #legend { display: grid; }
+  #hud.open #hint { display: none; }
+  @keyframes fade-in { from { opacity: 0; } }
+  #toastbox {
+    position: fixed; left: 50%; top: 16px; transform: translateX(-50%);
+    width: max-content; max-width: calc(100vw - 32px); text-align: center;
+    font: 13px/1.4 monospace; color: hsl(var(--hue) 45% 90% / 0.95);
+    background: #000000b8; border: 1px solid hsl(var(--hue) 40% 70% / 0.25);
+    border-radius: 6px; padding: 6px 12px;
+    pointer-events: none; opacity: 0; transition: opacity 0.4s;
+  }
+  #toastbox.show { opacity: 1; transition-duration: 0.1s; }
+  /* speed gauge: the bar spans reverse..max, zero sits a quarter of the way in */
+  #meter {
+    display: block; position: relative; width: 140px; height: 2px; margin: 6px auto 1px;
+    background: hsl(var(--hue) 30% 70% / 0.2);
+  }
+  #meter[hidden] { display: none; }
+  #meter::before {
+    content: ''; position: absolute; left: 25%; top: -2px; width: 1px; height: 6px;
+    background: hsl(var(--hue) 30% 80% / 0.6);
+  }
+  #meter i { position: absolute; top: 0; height: 100%; background: hsl(var(--hue) 70% 70%); }
   #pad {
-    position: fixed; right: 16px; bottom: 12px; display: flex; gap: 8px;
-    font: 13px/1 monospace; user-select: none;
+    position: fixed; right: 16px; bottom: 12px; display: flex; gap: 6px;
+    font: 13px/1 monospace; transition: opacity 0.7s;
   }
   #pad[hidden] { display: none; }   /* the display above would override [hidden] */
   #pad button {
-    background: #ffffff14; color: #ffffffcc; border: 1px solid #ffffff2e;
-    border-radius: 7px; padding: 11px 14px; font: inherit; cursor: pointer;
+    min-width: 44px; min-height: 44px; padding: 0 12px;
+    background: hsl(var(--hue) 30% 50% / 0.1); color: hsl(var(--hue) 35% 88% / 0.85);
+    border: 1px solid hsl(var(--hue) 35% 70% / 0.22);
+    border-radius: 8px; font: inherit; cursor: pointer;
     -webkit-tap-highlight-color: transparent;
   }
-  #pad button:active { background: #ffffff33; }
+  #pad button:active { background: hsl(var(--hue) 30% 60% / 0.3); }
+  #swatch i { display: inline-block; width: 14px; height: 14px; border-radius: 50%; vertical-align: middle; }
+  body.idle #pad { opacity: 0; pointer-events: none; }
   #hud.off ~ #pad { display: none; }
   /* on a phone the button row owns the bottom edge; lift the HUD clear of it */
   @media (max-width: 620px) {
-    #hud { bottom: 66px; max-width: calc(100% - 32px); }
+    #hud { bottom: 68px; }
   }
   /* Bloom rides on its own layer. Drawing it into the scene canvas would feed
      it back through the trail fade every frame and run away. */
@@ -65,18 +102,20 @@
 </style>
 </head>
 <body>
-<canvas id="matrix"></canvas>
-<canvas id="bloom"></canvas>
+<canvas id="matrix" role="img" aria-label="Matrix digital rain: columns of glowing glyphs falling through the dark"></canvas>
+<canvas id="bloom" aria-hidden="true"></canvas>
 <div id="fx"></div>
 <div id="dbg" hidden></div>
-<div id="hud">
-  <span id="keys">move <b>mouse</b> to steer &nbsp;·&nbsp; <b>scroll</b> / <b>W</b>/<b>S</b> speed &nbsp;·&nbsp; <b>space</b> warp &nbsp;·&nbsp; <b>C</b> palette &nbsp;·&nbsp; <b>M</b> classic/fly &nbsp;·&nbsp; <b>F</b> fullscreen &nbsp;·&nbsp; <b>V</b> effects &nbsp;·&nbsp; <b>B</b> bloom <span id="savehint">&nbsp;·&nbsp; <b>P</b> save</span> &nbsp;·&nbsp; <b>H</b> hide</span>
-  <span id="taps" hidden><b>drag</b> to steer &nbsp;·&nbsp; <b>two fingers</b> up/down for speed &nbsp;·&nbsp; <b>double-tap</b> to warp</span>
+<!-- the legend opens for a few seconds on load, then folds down to the hint -->
+<div id="hud" class="open">
+  <div id="legend"></div>
+  <span id="hint">press <b>?</b> for controls</span>
   <span class="seed" id="seedline"></span>
 </div>
 <div id="pad" hidden>
-  <button data-k="m">mode</button><button data-k="c">colour</button><button data-k=" ">warp</button><button data-k="h">hide</button>
+  <button data-k="?" aria-label="controls">?</button><button data-k="m" id="modebtn" aria-label="mode"></button><button data-k="c" id="swatch" aria-label="colour"><i></i></button><button data-k=" ">warp</button><button data-k="h">hide</button>
 </div>
+<div id="toastbox" role="status" aria-live="polite"><span id="toastmsg"></span><span id="meter" hidden><i></i></span></div>
 <script>
   const canvas = document.getElementById('matrix');
 
@@ -93,7 +132,7 @@
   const ctx = ctx2d(canvas);
   // browsers without canvas colour spaces ignore the option; then stay in sRGB
   const P3 = WANT_P3 && ctx.getContextAttributes?.().colorSpace === 'display-p3';
-  const SEED_STR = P.get('seed') || 'matrix';
+  let SEED_STR = P.get('seed') || 'matrix';
   const MSG = (P.get('msg') || '').toUpperCase();
   let MODE = P.get('mode') === 'classic' ? 'classic' : 'fly';   // 'fly' = 3D corridor, 'classic' = the film
   // Flying the camera through a field is exactly the parallax that triggers
@@ -115,8 +154,8 @@
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
-  const SEED = hash32(SEED_STR);
-  const rng = mulberry32(SEED);
+  let SEED = hash32(SEED_STR);
+  let rng = mulberry32(SEED);                // reassigned by reseed()
   const rand = (a, b) => a + rng() * (b - a);
 
   // The film's set: half-width katakana (narrow, scanned from cookbooks) with
@@ -228,7 +267,8 @@
   let focal = FOCAL;        // eased: widens (dolly-zoom) as speed climbs
 
   // speed: eased toward a target so acceleration ramps instead of jumping
-  let speedTarget = 6, speed = 6;   // forward walking speed (world units / frame)
+  const SPEED_MIN = -20, SPEED_MAX = 60, CRUISE = 6, WARP = 45;
+  let speedTarget = CRUISE, speed = CRUISE;   // forward walking speed (world units / frame)
 
   const IDLE_DRIFT = P.get('idle') === '1';
   let lastMouse = performance.now(); // idle timer: hides the cursor + HUD, gates autopilot
@@ -246,6 +286,8 @@
   // and still responds to a finger.
   const HAS_TOUCH = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
   const TOUCH = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
+  // an embedded frame is never granted downloads, and its URL is not the page's
+  const EMBEDDED = (() => { try { return window.self !== window.top; } catch (e) { return true; } })();
   const MAX_DPR = Math.min(window.devicePixelRatio || 1, TOUCH ? 1.5 : 2);
   const QUALITY = [1, 0.75, 0.5];   // render-scale steps
   let qi = 0;
@@ -349,10 +391,13 @@
   let TINTS, PAL, PAL_W;
   function setPalette(name) {
     paletteName = name;
-    TINTS = makeTints(hueFor(name));
+    const hue = hueFor(name);
+    TINTS = makeTints(hue);
     PAL = buildPal(TINTS, false);
     PAL_W = buildPal(TINTS, true);
-    seedline.textContent = `${MODE} · seed "${SEED_STR}" · ${name} · ${strands.length} strands · ${glyphs.length} glyphs${HAS_KANA ? '' : ' (no CJK font)'}` + (MSG ? ` · "${MSG}"` : '');
+    document.documentElement.style.setProperty('--hue', ((hue % 360) + 360) % 360);
+    swatch.firstChild.style.background = PAL[0].body;
+    seedline.textContent = `${MODE} · seed "${SEED_STR}" · ${name}${HAS_KANA ? '' : ' · no CJK font'}` + (MSG ? ` · "${MSG}"` : '');
   }
   function pickTint() {
     let r = rng();
@@ -363,10 +408,14 @@
 
   // --- strands ---
   // density also falls out of the seed unless it is pinned in the hash
-  const NUM = Math.max(40, Math.min(900, +P.get('density') || (200 + (SEED >>> 8) % 180)));
-  // classic runs about twice as many: most columns are lit at any moment in
-  // the film, and each drop is on screen for only about half its cycle
-  const NUM_CLASSIC = P.get('density') ? NUM : Math.min(900, Math.round(NUM * 2));
+  let NUM, NUM_CLASSIC;
+  function setCounts() {
+    NUM = Math.max(40, Math.min(900, +P.get('density') || (200 + (SEED >>> 8) % 180)));
+    // classic runs about twice as many: most columns are lit at any moment in
+    // the film, and each drop is on screen for only about half its cycle
+    NUM_CLASSIC = P.get('density') ? NUM : Math.min(900, Math.round(NUM * 2));
+  }
+  setCounts();
   const strands = [];
   setPalette(paletteName);
 
@@ -449,6 +498,13 @@
     // frame, so the order only breaks where one is recycled; see the frame loop.
     strands.sort((a, b) => b.z - a.z);
     setPalette(paletteName);
+    modebtn.textContent = MODE;
+    renderLegend();
+  }
+  // R: a new seed regrows the field in place
+  function reseed(str) {
+    SEED_STR = str; SEED = hash32(str); rng = mulberry32(SEED);
+    setCounts(); setMode(MODE);
   }
   setMode(MODE);
 
@@ -658,7 +714,7 @@
     if (DEBUG && ts - lastDbg > 250) {
       lastDbg = ts;
       dbg.textContent = `${ftEma.toFixed(1)} ms/frame · ${workEma.toFixed(1)} ms cpu · `
-        + `${nGlyph} glyphs · ${nGlow} glows · ${(W * dpr) | 0}×${(H * dpr) | 0} @${dpr.toFixed(2)} · q${QUALITY[qi]}`
+        + `${strands.length} strands · ${nGlyph} glyphs · ${nGlow} glows · ${(W * dpr) | 0}×${(H * dpr) | 0} @${dpr.toFixed(2)} · q${QUALITY[qi]}`
         + ` · latin ${MONO_SIZE.toFixed(2)}x${SQUEEZE ? ' squeezed ' + MONO_SQUEEZE.toFixed(2) : ''}`
         + ` · bloom ${bloomOn ? BLOOM.toFixed(2) + (HALO ? ' halo' : '') : 'off'} · ${P3 ? 'p3' : 'srgb'}`;
     }
@@ -674,75 +730,197 @@
     camTX = (0.5 - x / W) * 2 * 520;
     camTY = (y / H - 0.5) * 2 * 380;
   }
+
+  // --- HUD ------------------------------------------------------------------
+  // The legend lists only what works here: the travel rows go in classic, and
+  // save / link / fullscreen go wherever the browser would refuse them.
+  function renderLegend() {
+    const fly = MODE === 'fly';
+    const rows = TOUCH ? [
+      ['drag', 'steer'],
+      fly && ['two fingers ↕', 'speed'],
+      fly && ['double-tap', 'warp'],
+      ['long-press', 'hide / show everything'],
+    ] : [
+      ['mouse', 'steer'],
+      fly && ['scroll · W S', 'speed'],
+      fly && ['space', 'warp'],
+      ['C · ⇧C', 'palette'],
+      ['M', fly ? 'classic, flat like the film' : 'fly through it'],
+      ['R', 'new seed'],
+      !EMBEDDED && ['L', 'copy link'],
+      document.fullscreenEnabled && ['F', 'fullscreen'],
+      ['V · B', 'effects · bloom'],
+      !EMBEDDED && ['P', 'save png'],
+      ['H', 'hide everything'],
+      ['?', 'close this'],
+    ];
+    legend.innerHTML = rows.filter(Boolean).map(([k, a]) => `<b>${k}</b><span>${a}</span>`).join('');
+  }
+  let legendTouched = false;
+  setTimeout(() => { if (!legendTouched) hud.classList.remove('open'); }, 6000);
+
+  // Every change answers with a line at the top of the screen; speed also gets
+  // a gauge, since nothing else says where you are in its range.
+  let toastT = 0;
+  function toast(text, v) {
+    toastmsg.textContent = text;
+    meter.hidden = v === undefined;
+    if (v !== undefined) {
+      const span = SPEED_MAX - SPEED_MIN, z = -SPEED_MIN / span, f = v / span;
+      meter.firstChild.style.left = Math.min(z, z + f) * 100 + '%';
+      meter.firstChild.style.width = Math.abs(f) * 100 + '%';
+    }
+    toastbox.classList.add('show');
+    clearTimeout(toastT);
+    toastT = setTimeout(() => toastbox.classList.remove('show'), 1400);
+  }
+
+  // Keep the hash in step with the screen, so the address bar is always a link
+  // to this look. replaceState: no history entry, and no hashchange.
+  let modeChosen = !!P.get('mode');
+  function writeHash() {
+    if (EMBEDDED) return;                      // nobody sees a frame's URL
+    const q = new URLSearchParams(location.hash.slice(1));
+    const put = (k, v, dflt) => v === dflt ? q.delete(k) : q.set(k, v);
+    put('seed', SEED_STR, 'matrix');
+    put('palette', paletteName, 'green');
+    // fly stays implicit, so the link still opens flat for anyone whose OS
+    // asks for reduced motion
+    if (modeChosen) put('mode', MODE, 'fly');
+    const h = q.toString();
+    try { history.replaceState(null, '', h ? '#' + h : location.pathname + location.search); }
+    catch (e) { /* sandboxed */ }
+  }
+  // a hash edited by hand (a seed typed into the address bar) regrows the page
+  if (!EMBEDDED) window.addEventListener('hashchange', () => location.reload());
+
+  const PALETTES = [...NAMES, 'seed', 'auto'];
+  function setSpeed(v, label) {
+    if (MODE === 'classic') { toast('classic has no travel · switch to fly'); return; }
+    speedTarget = Math.min(SPEED_MAX, Math.max(SPEED_MIN, v));
+    const n = Math.round(speedTarget);
+    toast(label || (n < 0 ? `reverse ${-n}` : `speed ${n}`), speedTarget);
+  }
+
   // every control routes through here, so keys and on-screen buttons agree
-  function act(k) {
-    if (k === 'w' || k === 'arrowup') speedTarget = Math.min(60, speedTarget + 2);
-    if (k === 's' || k === 'arrowdown') speedTarget = Math.max(-20, speedTarget - 2);
-    if (k === ' ') speedTarget = speedTarget > 30 ? 6 : 45;              // warp toggle
-    if (k === 'c') setPalette(NAMES[(NAMES.indexOf(paletteName) + 1) % NAMES.length]);
-    if (k === 'h') hud.classList.toggle('off');
-    if (k === 'm') setMode(MODE === 'classic' ? 'fly' : 'classic');
-    if (k === 'v') fx.classList.toggle('off');
-    if (k === 'b') bloomOff = !bloomOff;
-    // both of these are refused inside an embedded frame; fail quietly there
+  function act(k, shift) {
+    if (k === 'w' || k === 'arrowup') setSpeed(speedTarget + 2);
+    if (k === 's' || k === 'arrowdown') setSpeed(speedTarget - 2);
+    if (k === ' ') setSpeed(speedTarget > 30 ? CRUISE : WARP, speedTarget > 30 ? 'cruise' : 'warp');
+    if (k === 'c') {
+      const i = PALETTES.indexOf(paletteName), n = PALETTES.length;
+      setPalette(PALETTES[(i + (shift ? -1 : 1) + n) % n]);
+      toast(`palette · ${paletteName}${paletteName === 'auto' ? ' (follows the clock)' : ''}`);
+      writeHash();
+    }
+    if (k === 'm') {
+      modeChosen = true;
+      setMode(MODE === 'classic' ? 'fly' : 'classic');
+      toast(`mode · ${MODE}`); writeHash();
+    }
+    if (k === 'r') {
+      // only the name is random; the field grows from it like any other seed
+      reseed(Math.random().toString(36).slice(2, 8));
+      toast(`seed · "${SEED_STR}"`); writeHash();
+    }
+    if (k === 'h') {
+      hud.classList.toggle('off');
+      if (hud.classList.contains('off')) toast(`hidden · ${TOUCH ? 'long-press' : 'H'} to bring it back`);
+    }
+    if (k === '?' || k === '/') {
+      legendTouched = true;
+      if (hud.classList.contains('off')) { hud.classList.remove('off'); hud.classList.add('open'); }
+      else hud.classList.toggle('open');
+    }
+    if (k === 'v') { fx.classList.toggle('off'); toast(`effects · ${fx.classList.contains('off') ? 'off' : 'on'}`); }
+    if (k === 'b') {
+      if (BLOOM <= 0) toast('bloom is off in this link');
+      else {
+        bloomOff = !bloomOff;
+        toast(bloomOff ? 'bloom · off' : qi ? 'bloom · on, paused while frames are slow' : 'bloom · on');
+      }
+    }
+    // refused inside an embedded frame, and on phones that cannot go fullscreen
     if (k === 'f') {
-      try {
+      if (!document.fullscreenEnabled) toast('fullscreen is unavailable here');
+      else try {
         if (document.fullscreenElement) document.exitFullscreen();
-        else document.documentElement.requestFullscreen?.()?.catch(() => {});
+        else document.documentElement.requestFullscreen()?.catch(() => {});
       } catch (e) { /* not permitted here */ }
     }
+    if (k === 'l') {
+      if (EMBEDDED) toast('no link to copy in an embedded page');
+      else if (!navigator.clipboard) toast('the link is in the address bar');
+      else navigator.clipboard.writeText(location.href)
+        .then(() => toast('link copied'), () => toast('copy blocked · the link is in the address bar'));
+    }
     if (k === 'p') {
-      try {
+      if (EMBEDDED) toast('saving is unavailable in an embedded page');
+      else try {
         const a = document.createElement('a');
         a.download = `matrix-${SEED_STR}-${Date.now()}.png`;
         a.href = canvas.toDataURL('image/png');
         a.click();
-      } catch (e) { /* downloads blocked */ }
+        toast('saved png');
+      } catch (e) { toast('save blocked'); }
     }
   }
 
   // keystrokes only arrive once this frame has focus, which it may not have
   // when the page is embedded; claim it on first interaction
-  // an embedded frame is never granted downloads, so stop offering the save
-  const EMBEDDED = (() => { try { return window.self !== window.top; } catch (e) { return true; } })();
-  if (EMBEDDED) savehint.hidden = true;
   const grab = () => { try { window.focus(); } catch (e) { /* cross-origin */ } };
   window.addEventListener('pointerdown', grab);
   window.addEventListener('mousemove', (e) => steer(e.clientX, e.clientY));
   document.addEventListener('mouseleave', () => { mx = my = -1e9; });   // gaze off when the cursor leaves
   window.addEventListener('wheel', (e) => {
-    speedTarget = Math.min(60, Math.max(-20, speedTarget - e.deltaY * 0.02));
+    if (e.deltaY) setSpeed(speedTarget - e.deltaY * 0.02);
   }, { passive: true });
   window.addEventListener('keydown', (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;   // ⌘R, ⌘L, ⌘C belong to the browser
     const k = e.code === 'Space' ? ' ' : e.key.toLowerCase();
+    // a held key repeats: fine for speed, but a toggle would flicker
+    if (e.repeat && !['w', 's', 'arrowup', 'arrowdown'].includes(k)) return;
     if (k === ' ') e.preventDefault();
-    act(k);
+    act(k, e.shiftKey);
   });
 
   // --- touch ----------------------------------------------------------------
-  // One finger steers, two fingers slide the speed, a double-tap warps. Without
-  // this a phone gets a fixed camera and a HUD naming keys it does not have.
+  // One finger steers, two fingers slide the speed, a double-tap warps, and a
+  // long-press hides or restores everything -- the way back from 'hide' on a
+  // phone, which has no H key.
   if (TOUCH) {
-    keys.hidden = true; taps.hidden = false; pad.hidden = false;
-    pad.addEventListener('click', (e) => { const k = e.target.dataset && e.target.dataset.k; if (k) act(k); });
+    hint.hidden = true; pad.hidden = false;    // the pad's own ? opens the legend
+    pad.addEventListener('pointerdown', () => { lastMouse = performance.now(); });   // no fading mid-tap
+    pad.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) act(b.dataset.k); });
   }
   if (HAS_TOUCH) {
     let pinchY = null, pinchSpeed = 0, lastTap = 0;
+    let pressT = 0, pressed = false, px = 0, py = 0;
     const midY = (t) => (t[0].clientY + t[1].clientY) / 2;
+    const unpress = () => { clearTimeout(pressT); pressT = 0; };
     canvas.addEventListener('touchstart', (e) => {
-      if (e.touches.length === 1) steer(e.touches[0].clientX, e.touches[0].clientY);
-      else if (e.touches.length === 2) { pinchY = midY(e.touches); pinchSpeed = speedTarget; }
+      unpress();
+      if (e.touches.length === 1) {
+        px = e.touches[0].clientX; py = e.touches[0].clientY;
+        steer(px, py);
+        pressT = setTimeout(() => { pressT = 0; pressed = true; act('h'); }, 600);
+      } else if (e.touches.length === 2) { pinchY = midY(e.touches); pinchSpeed = speedTarget; }
     }, { passive: true });
     canvas.addEventListener('touchmove', (e) => {
       e.preventDefault();                       // no page scroll or pinch-zoom
+      if (pressT && Math.hypot(e.touches[0].clientX - px, e.touches[0].clientY - py) > 12) unpress();   // a drag
       if (e.touches.length === 1 && pinchY === null) steer(e.touches[0].clientX, e.touches[0].clientY);
       else if (e.touches.length === 2) {        // drag up to speed up
-        speedTarget = Math.min(60, Math.max(-20, pinchSpeed + (pinchY - midY(e.touches)) * 0.12));
+        setSpeed(pinchSpeed + (pinchY - midY(e.touches)) * 0.12);
       }
     }, { passive: false });
+    canvas.addEventListener('touchcancel', unpress, { passive: true });
     canvas.addEventListener('touchend', (e) => {
+      unpress();
       if (e.touches.length === 0) {
-        if (pinchY === null) {                  // a tap, not the end of a pinch
+        if (pressed) pressed = false;           // the end of a long-press, not a tap
+        else if (pinchY === null) {             // a tap, not the end of a pinch
           const now = performance.now();
           if (now - lastTap < 320) { act(' '); lastTap = 0; } else lastTap = now;
         }
