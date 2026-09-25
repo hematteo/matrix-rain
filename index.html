@@ -31,6 +31,7 @@
     position: fixed; right: 16px; bottom: 12px; display: flex; gap: 8px;
     font: 13px/1 monospace; user-select: none;
   }
+  #pad[hidden] { display: none; }   /* the display above would override [hidden] */
   #pad button {
     background: #ffffff14; color: #ffffffcc; border: 1px solid #ffffff2e;
     border-radius: 7px; padding: 11px 14px; font: inherit; cursor: pointer;
